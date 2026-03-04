@@ -47,13 +47,12 @@ class GraphBuilder:
         for node in nodes:
             entity = node.get('name', '')
             if self.graph.has_node(entity):
-                self.graph.nodes[entity]['occurrences'] += 1
                 if chunk.id not in self.graph.nodes[entity]['chunk_ids']:
                     self.graph.nodes[entity]['chunk_ids'].append(chunk.id)
             else:
                 self.graph.add_node(
                     node_for_adding=entity, type=node.get('type', 'unknown'),
-                    occurrences=1, chunk_ids=[chunk.id]
+                    chunk_ids=[chunk.id]
                 )
         
         for edge in edges:

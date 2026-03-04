@@ -1,6 +1,10 @@
 import os
 from openai import OpenAI
-from GraphRAG import GraphRAG, Chunk
+from GraphRAG import GraphRAG
+
+if 'OPENROUTER_API_KEY' not in os.environ or 'OPENAI_API_KEY' not in os.environ:
+    from dotenv import load_dotenv
+    load_dotenv()
 
 
 def main():

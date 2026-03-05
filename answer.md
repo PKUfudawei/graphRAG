@@ -1,36 +1,38 @@
 **Scrooge (Ebenezer Scrooge)**  
 
-| Aspect | What the knowledge‑graph tells us |
-|--------|-----------------------------------|
-| **Type / Role** | *Person* – the central figure of **A Christmas Car‑ol**. He is the “grasping, covetous old man” who runs a **counting‑house** (a money‑changing office) in the **City of London**.  <br>Relations that define him: <br>• *Scrooge partner_of Marley* (business partner for many years) <br>• *Scrooge sole_executor Marley*, *sole_administrator Marley*, *sole_residuary_legatee Marley* (legal ties after Marley’s death) <br>• *Scrooge employs Bob Cratchit* (as clerk) <br>• *Scrooge uncle_of Fred* (nephew) <br>• *Scrooge husband_of Belle* (former sweetheart) <br>• *Scrooge has_trait Tight‑fisted hand* and *Covetous old sinner* (personality) <br>• *Scrooge is rich* (wealth) but “does not warm” – external **cold** and **heat** have little influence on him. |
-| **Core personality traits** | *Tight‑fisted, covetous, avaricious, “a world of fools”, “humbug” about Christmas*, yet later shows *care, remorse, and generosity* after the three Spirits’ visits. |
-| **Primary social / family relationships** | 1. **Jacob Marley** – former business partner; now a **spectre** who appears to warn Scrooge. <br>2. **Bob Cratchit** – Scrooge’s under‑paid clerk; later becomes the beneficiary of Scrooge’s generosity (salary raise, Christmas dinner, a turkey). <br>3. **Mrs. Cratchit** – wife of Bob; Scrooge interacts with her (asks about father, brother, kisses Bob, etc.). <br>4. **Tiny Tim** – Bob’s crippled son; Scrooge becomes a “second father” to him after the Spirits show his possible death. <br>5. **Fred** – Scrooge’s nephew (also called “Fred”); the cheerful, Christmas‑loving relative who repeatedly greets Scrooge with “A Merry Christmas” and tries to persuade him to join the holiday spirit. <br>6. **Belle** – Scrooge’s former sweetheart (later wife of another man); mentioned in the “past” scenes. <br>7. **Dick Wilkins** – a fellow apprentice of Scrooge’s; appears in the “past” when Scrooge revisits the warehouse where he once worked. <br>8. **Fezziwig** – Scrooge’s former employer; appears in the “past” as the jovial merchant who taught Scrooge the value of kindness. |
-| **Supernatural / spiritual relationships** | • **Ghost of Christmas Past** – shows Scrooge scenes from his own youth (Fezziwig’s warehouse, school‑master, the “lonely child”, etc.). <br>• **Ghost of Christmas Present** – reveals the present hardships of the Cratchit family, the abundance of the world, and the “Ignorance” and “Want” children. <br>• **Ghost of Christmas Yet‑to‑Come (Phantom)** – points to Scrooge’s own grave, the future consequences of his current behaviour, and the “dark shadow” he casts on others. <br>All three Spirits “strive within” Scrooge (relation: *Spirits of all Three shall strive within Scrooge*). |
-| **Business / professional ties** | • *Scrooge owns counting‑house* (the office where he works). <br>• *Scrooge keeps_in_own_room coal‑box* (controls the fire for his clerk). <br>• *Scrooge seized Ruler* (a symbolic act of authority). <br>• *Scrooge talks_to Gentlemen* (portly gentlemen who discuss “prisons”, “workhouses”, “Treadmill”, “Poor Law”). <br>• *Scrooge interacts with Merchants* (in the “past” at Fezziwig’s warehouse). |
-| **Geographical / locational anchors** | • *Scrooge lives_in Chambers* (the gloomy suite that once belonged to Marley). <br>• *Scrooge is located_in City of London*. <br>• *Scrooge moves_through streets* (both in the present and in the visions of the Spirits). <br>• *Scrooge goes_to Camden Town* (to arrange a cab for the prize turkey). |
-| **Key events that define his relationships** | 1. **Marley’s visitation** – triggers the whole supernatural journey. <br>2. **Christmas Eve at the counting‑house** – Scrooge’s clash with his clerk, the arrival of Fred, and the first “humbug” exchange. <br>3. **The three Spirits’ visits** – each Spirit forces Scrooge to confront a different set of relationships (past → Fezziwig, Dick, school‑master; present → Cratchit family, Ignorance & Want; future → his own grave). <br>4. **Post‑vision transformation** – Scrooge raises Bob’s wages, gives a turkey to the Cratchits, embraces Fred, visits the church, and becomes a “good man” known by the city. |
+- **Identity** – Scrooge is the central human character of *A Christmas Carol*. He is introduced as a “grasping, covetous old man” and later becomes “a good man of the city” after his transformation.  
+  - *Relations*: “Scrooge alias Ebenezer” (1); “Scrooge is a tight‑fisted hand” (1); “Scrooge shows signs of avarice” (1); “Scrooge shows signs of care” (1); “Scrooge has learned Truth” (1).  
+
+---
+
+## Main Relationships
+
+| Relationship | Entity (type) | How they are linked to Scrooge | Key evidence from the graph |
+|--------------|----------------|--------------------------------|-----------------------------|
+| **Jacob Marley** | Former business partner (person) | Scrooge was Marley’s partner for many years; Marley’s ghost appears to warn Scrooge. | “Scrooge partner (of many years) Marley” (1); “Marley is Marley’s Ghost” (1); “Marley appeared to Scrooge” (1). |
+| **Bob Cratchit** | Clerk / employee (person) | Scrooge employs Bob as his clerk and later raises his salary and helps his family. | “Scrooge employs as clerk Bob Cratchit” (1); “Scrooge promises to raise salary Bob” (1). |
+| **Mrs. Cratchit** | Bob’s wife (person) | Interacts with Scrooge when she thanks him and asks about her husband and Tiny Tim. | “Mrs. Cratchit addresses Scrooge” (1); “Mrs. Cratchit drinks health of Scrooge” (1). |
+| **Tiny Tim** | Bob’s youngest son (person) | Scrooge becomes a “second father” to Tiny Tim and pleads for his life. | “Scrooge acts as second father to Tiny Tim” (1); “Scrooge wishes live Tiny Tim” (1). |
+| **Fred (Scrooge’s nephew)** | Nephew (person) | Fred repeatedly greets Scrooge with “Merry Christmas” and tries to persuade him to enjoy the holiday. | “Scrooge’s nephew nephew_of Scrooge” (2); “Fred admiration Scrooge” (1); “Fred addresses Scrooge” (1). |
+| **Belle** | Former sweetheart / wife‑of‑Scrooge (person) | Scrooge’s past romantic relationship; she appears in the Past‑spirit vision. | “Belle wife_of Scrooge” (1); “Scrooge identified_as old_friend_of_Belle” (1). |
+| **Niece (by marriage)** | Scrooge’s niece (person) | Mentioned when the niece laughs at Scrooge’s behavior and calls him a “ridiculous fellow.” | “Scrooge niece by marriage Niece (by marriage)” (1). |
+| **Dick Wilkins** | Former apprentice (person) | Scrooge was an apprentice of Dick; they meet again in the Past‑spirit scene. | “Scrooge former apprentice of Dick Wilkins” (1); “Dick Wilkins is in city” (1). |
+| **Fezziwig** | Former employer (person) | Scrooge’s early master; appears in the Past‑spirit vision of the “Domestic Ball.” | “Fezziwig former employer of Scrooge” (1); “Fezziwig participated in Domestic Ball” (1). |
+| **Old Joe** | City‑dweller (person) | Encountered in the “obscure part of the town” with the Phantom. | “Scrooge came into presence of Old Joe” (1). |
+| **Portly gentlemen (businessmen)** | Group of businessmen (people) | Two “portly gentlemen, pleasant to behold” visit Scrooge’s office and discuss charity. | “Scrooge met portly gentleman” (1); “Scrooge talked with gentlemen about prisons and workhouses” (1). |
+| **Ghost of Christmas Past** | Spirit (supernatural being) | Shows Scrooge scenes from his childhood and early life. | “Ghost of Christmas Past is_a Spirit” (1); “Scrooge looks_at Ghost of Christmas Past” (1). |
+| **Ghost of Christmas Present** | Spirit (supernatural being) | Shows Scrooge the current Christmas celebrations, especially the Cratchit household. | “Ghost of Christmas Present greeted Scrooge” (1); “Scrooge addresses Spirit Spirit” (1). |
+| **Ghost of Christmas Yet to Come (Phantom)** | Spirit/Phantom (supernatural being) | Shows Scrooge the future, including his own grave. | “Ghost of Christmas Yet to Come alias of Phantom” (1); “Scrooge reads his name on stone” (1). |
+| **The City of London** | Location | Scrooge lives and works in the City; many of his actions are set there. | “Scrooge located_in City of London” (1). |
+| **His own rooms (yard, chambers, bedroom, etc.)** | Locations | Scrooge’s personal spaces where he locks himself in, lights candles, etc. | “Scrooge lives in chambers” (1); “Scrooge locked himself in door” (1). |
+
+---
 
 ### Summary  
 
-- **Who is Scrooge?**  
-  Ebenezer Scrooge is the miserly, cold‑hearted owner of a London counting‑house, notorious for his “humbug” attitude toward Christmas and for treating people (especially the poor) with indifference. He is rich, avaricious, and physically “iced” even during the dog‑days, but he is also a man capable of change.
+- **Scrooge** is the miserly businessman at the heart of the story, originally a “tight‑fisted, covetous old sinner” who later becomes a generous, caring man.  
+- His **family‑type ties** are: former lover **Belle**, nephew **Fred**, niece (by marriage), and the **Cratchit** family (Bob, Mrs. Cratchit, Tiny Tim) whom he eventually supports.  
+- His **business ties** are: partnership with **Jacob Marley**, employment of **Bob Cratchit**, past apprenticeship under **Dick Wilkins**, early employment with **Fezziwig**, and interactions with various **businessmen** and **Old Joe**.  
+- His **supernatural ties** are the three **Christmas Spirits** (Past, Present, Yet‑to‑Come) and the ghost of his dead partner **Marley**, all of which drive his moral transformation.  
 
-- **His main relationships**  
-
-| Category | Key Person(s) | Nature of Relationship |
-|----------|---------------|------------------------|
-| **Family / kin** | **Fred (nephew)** – Scrooge’s cheerful, Christmas‑loving nephew who repeatedly greets him and later invites him to dinner. |
-| | **Belle** – Scrooge’s former sweetheart (later wife of another man); appears in his past. |
-| | **Dick Wilkins** – former apprentice; part of Scrooge’s early career. |
-| **Business / work** | **Jacob Marley** – former partner; now a ghost who warns Scrooge. |
-| | **Bob Cratchit** – under‑paid clerk; later receives a raise, a turkey, and Scrooge’s goodwill. |
-| | **Mrs. Cratchit** – Bob’s wife; Scrooge interacts with her about the family. |
-| | **Tiny Tim** – Bob’s crippled son; Scrooge becomes a protective “second father”. |
-| | **Fezziwig** – former employer who taught Scrooge kindness; appears in the Past. |
-| **Spiritual** | **Ghost of Christmas Past** – shows Scrooge his youthful mistakes. |
-| | **Ghost of Christmas Present** – reveals present suffering (Cratchits) and the children “Ignorance” and “Want”. |
-| | **Ghost of Christmas Yet‑to‑Come (Phantom)** – points to Scrooge’s future grave and the consequences of his greed. |
-| **Social / community** | **Gentlemen (portly, business men)** – discuss prisons, workhouses, the Poor Law; Scrooge argues with them about “surplus population”. |
-| | **City of London** – the setting of his office, streets, and the various visions. |
-
-Thus, Scrooge is a wealthy, miserly businessman whose life is intertwined with a network of family members (nephew Fred, former lover Belle), employees (Bob and Mrs. Cratchit, Tiny Tim), former business partners (Jacob Marley), past mentors (Fezziwig, Dick Wilkins), and three supernatural Spirits that force him to confront and ultimately transform these relationships.
+These relationships together illustrate Scrooge’s evolution from an isolated, avaricious clerk‑owner to a figure celebrated by the city for his newfound generosity.

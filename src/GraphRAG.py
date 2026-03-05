@@ -119,7 +119,7 @@ class GraphRAG:
         Answer:"""
         print("Prompt:\n", prompt)
         response = self.client.chat.completions.create(
-            model="openrouter/auto", temperature=0.2, response_format={"type": "text"},
+            model="openrouter/auto", temperature=0, response_format={"type": "text"},
             messages=[{"role": "user", "content": prompt}],
         )
         

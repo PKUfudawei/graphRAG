@@ -29,6 +29,7 @@ class GraphRAG:
             )
 
             result = json.loads(response.choices[0].message.content)
+            print(f"Extracted entities from query:\n"+'\n'.join([f"- {entity}" for entity in result.get('entities', [])]))
             return result.get('entities', []) 
         except Exception as e:
             print(f"Error extracting entities from query: {e}")

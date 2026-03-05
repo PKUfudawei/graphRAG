@@ -4,8 +4,7 @@ from src.GraphRAG import GraphRAG
 from src.Chunker import Chunker
 from src.GraphBuilder import GraphBuilder
 
-if not os.path.exists('checkpoints'):
-    os.makedirs('checkpoints')
+os.makedirs('checkpoints', exist_ok=True)
 
 chunker = Chunker(chunk_size=512, overlap=50, encoding_model="cl100k_base")
 chunks_path = 'checkpoints/chunks.json'

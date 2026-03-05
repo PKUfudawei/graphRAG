@@ -12,6 +12,7 @@ class Chunk:
         self.token_count = end_token - start_token
         self.text_count = len(chunk_text)
 
+    """
     def __repr__(self):
         return '\n'.join([
             "Chunk",
@@ -19,6 +20,7 @@ class Chunk:
             f"=> text:",
             f"{self.text}"
         ])
+    """
 
 
 class Chunker:
@@ -36,7 +38,7 @@ class Chunker:
         chunks = []
         total_tokens = len(tokens)
 
-        for idx, start in tqdm(enumerate(range(0, total_tokens, self.chunk_size - self.overlap)), desc=f"Chunking text from source: {source if source else 'unknown'}"):
+        for idx, start in enumerate(tqdm(range(0, total_tokens, self.chunk_size - self.overlap), desc=f"Chunking text from source: {source if source else 'unknown'}")):
             end = min(start + self.chunk_size, total_tokens)
             chunk_tokens = tokens[start:end]
             chunk_text = self.encoder.decode(chunk_tokens)

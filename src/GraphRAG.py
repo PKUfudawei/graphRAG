@@ -76,7 +76,7 @@ class GraphRAG:
         relevant_chunks = []
         for chunk_id in relevant_chunk_ids:
             if chunk_id < len(self.chunks):
-                relevant_chunks.append(f"- Text chunk {chunk_id}:\n{self.chunks[chunk_id]['text']}")
+                relevant_chunks.append(f"- Text chunk {chunk_id}:\n{self.chunks[chunk_id].text}")
         return relevant_chunks
 
 
@@ -116,7 +116,7 @@ class GraphRAG:
         4. If the information is insufficient, please clearly indicate this
 
         Answer:"""
-        
+        print("Prompt:\n", prompt)
         response = self.client.chat.completions.create(
             model="openrouter/auto", temperature=0.2, response_format={"type": "text"},
             messages=[{"role": "user", "content": prompt}],

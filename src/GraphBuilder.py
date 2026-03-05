@@ -46,7 +46,10 @@ class GraphBuilder:
 
         for node in nodes:
             entity = node.get('name', '')
-            if self.graph.has_node(entity):
+            if entity in self.graph.nodes:
+                if 'chunk_ids' not in self.graph.nodes[entity]:
+                    print(f"Warning: node '{entity}' in chunk {chunk.id} does not have 'chunk_ids' attribute. Initializing it.")
+                    self.graph.nodes[entity]['chunk_ids'] = []
                 if chunk.id not in self.graph.nodes[entity]['chunk_ids']:
                     self.graph.nodes[entity]['chunk_ids'].append(chunk.id)
             else:
@@ -54,6 +57,7 @@ class GraphBuilder:
                     node_for_adding=entity, type=node.get('type', 'unknown'),
                     chunk_ids=[chunk.id]
                 )
+            
         
         for edge in edges:
             source = edge.get('source', '')
@@ -92,7 +96,7 @@ class GraphBuilder:
 
 
     def save_graph(self, file_path, graph=None):
-        data = json_graph.node_link_data(self.graph if graph is None else graph)
+        data = json_graph.node_link_data(self.graph if graph is None else graph, edges="edges")
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
         print(f"Graph saved to {file_path}")
@@ -101,6 +105,6 @@ class GraphBuilder:
     def load_graph(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        self.graph = json_graph.node_link_graph(data)
+        self.graph = json_graph.node_link_graph(data, edges="links")
         print(f"Graph loaded from {file_path} with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
         return self.graph

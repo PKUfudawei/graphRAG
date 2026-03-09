@@ -209,3 +209,4 @@ __marimo__/
 # Customized
 .env
 checkpoint*/
+data/

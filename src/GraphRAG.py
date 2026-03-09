@@ -1,6 +1,4 @@
-import networkx as nx
 import json
-from collections import defaultdict
 
 
 class GraphRAG:

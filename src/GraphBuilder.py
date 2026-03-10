@@ -1,28 +1,18 @@
-import json, os
+import json, faiss
 import networkx as nx
-from tqdm import tqdm
 from networkx.readwrite import json_graph
+from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import community
+from collections import Counter
 
 
 class GraphBuilder:
-    def __init__(self, embed_model, LLM, cache_dir='./checkpoints/'):
+    def __init__(self, extract_model=None, embed_model=None, graph=None):
+        self.extract_model = extract_model
         self.embed_model = embed_model
-        self.LLM = LLM
-        self.graph = nx.MultiDiGraph()
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
+        self.graph = nx.MultiDiGraph() if graph is None else graph
+        
     
-    
-    def normalize_entity_name(self, name):
-        if not name:
-            return None
-        return name.strip().lower().replace('_', ' ')
-
-
     def extract_nodes_and_edges(self, text):
         system_prompt = "You extract entities and relations from text."
         user_prompt = f"""
@@ -39,123 +29,149 @@ Text:
 {text}
 """
         try:
-            result = self.LLM.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
+            result = self.extract_model.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
             return result.get('nodes', []), result.get('edges', [])
         except Exception as e:
             print(f"Error in entity extraction: {e}")
             return [], []
-
-
-    def update_graph(self, chunk):
-        nodes, edges = self.extract_nodes_and_edges(text=chunk.text)
-
-        for node in nodes:
-            entity = self.normalize_entity(node.get("name"))
-            if not entity:
+    
+    
+    def add_nodes(self, nodes):
+        for node in tqdm(nodes, desc='Adding nodes'):
+            name = node.get("name")
+            if not name:
                 continue
-            node_type = node.get("type", "unknown")
-            if entity not in self.graph:
-                self.graph.add_node(
-                    node_for_adding=entity, type=node_type, chunk_ids=[chunk.id]
-                )
-            else:
-                if chunk.id not in self.graph.nodes[entity]["chunk_ids"]:
-                    self.graph.nodes[entity]["chunk_ids"].append(chunk.id)
-                else:
-                    print(f"Warning: node '{entity}' in chunk {chunk.id} does not have 'chunk_ids' attribute. Initializing it.")
-                    self.graph.nodes[entity]['chunk_ids'] = [chunk.id]
 
+            if name not in self.graph:
+                self.graph.add_node(name, type=node.get("type", "unknown"), weight=1)
+            else:
+                self.graph.nodes[name]['weight'] += 1
         
-        for edge in edges:
-            source = self.normalize_entity(edge.get("source"))
-            target = self.normalize_entity(edge.get("target"))
+        return self.graph
+    
+    
+    def add_edges(self, edges):
+        for edge in tqdm(edges, desc="Adding edges"):
+            source, target = edge.get("source"), edge.get("target")
             relation = edge.get("relation", "related with")
-            
             if not source or not target:
                 continue
 
-            merged = False
-            if self.graph.has_edge(source, target):
-                for key, edge_data in self.graph[source][target].items():
-                    if edge_data["relation"] == relation:
-                        if chunk.id not in edge_data["chunk_ids"]:
-                            edge_data['chunk_ids'].append(chunk.id)
-                        merged = True
-                        break
-            if not merged:
-                self.graph.add_edge(
-                    u_for_edge=source, v_for_edge=target, 
-                    relation=relation, chunk_ids=[chunk.id],
-                )
-
-        return self.graph
-
-
-    def build_graph(self, chunks, workers=8):
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            list(tqdm(
-                executor.map(self.update_graph, chunks),
-                total=len(chunks), desc="Building graph",
-            ))
-        print(f"Graph built: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
-        return self.graph
-
-    
-    def merge_entity(self, threshold=0.9):
-        entities = list(self.graph.nodes)
-        embeddings = self.embed_model.encode(entities)
-        similarity = cosine_similarity(embeddings)
-        merged = {}
-
-        for i in range(len(entities)):
-            for j in range(i+1, len(entities)):
-                if similarity[i][j] > threshold:
-                    merged[entities[j]] = entities[i]
-
-        for old, new in merged.items():
-            if old == new:
-                continue
-            nx.relabel_nodes(self.graph, {old: new}, copy=False)
-
-        return self.graph
-
-
-    def cluster_community(self, graph, level=0, max_level=2):
-        if level >= max_level:
-            return
-        undirected = self.graph.to_undirected()
-        partition = community.best_partition(undirected)
-        for node, community in partition.items():
-            self.graph.nodes[node][f"community_{level}"] = community
-
-        communities = {}
-        for node, community in partition.items():
-            communities.setdefault(community, []).append(node)
-
-        for comm_nodes in communities.values():
-            subgraph = self.graph.subgraph(comm_nodes)
-
-            if len(subgraph) > 10:
-                self.cluster_community(subgraph, level+1)
-        return self.graph
-
-
-    def build_index(self):
-        self.entity_to_chunks, self.community_to_chunks = {}, {}
-        for node, node_data in self.graph.nodes(data=True):
-            chunk_ids = node_data.get("chunk_ids", [])
-            self.entity_to_chunks[node] = set(chunk_ids)
-
-            community = node_data.get("community")
-            if community is None:
-                continue
-            self.community_to_chunks.setdefault(community, set()).update(chunk_ids)
-
-        return self.entity_to_chunks, self.community_to_chunks
+            if not self.graph.has_edge(source, target, key=relation):
+                self.graph.add_edge(source, target, key=relation, weight=1)
+            else:
+                self.graph[source][target][relation]['weight'] += 1
         
+        return self.graph
 
-    def save_graph(self, path, graph=None):
-        data = json_graph.node_link_data(self.graph if graph is None else graph, edges="edges")
+
+    def normalize_names(self, names, threshold=0.9):
+        freq = Counter(names)
+        unique_names = list(freq.keys())
+        embeddings = self.embed_model.encode(unique_names)
+        
+        faiss.normalize_L2(embeddings)
+        index = faiss.IndexHNSWFlat(embeddings.shape[1], 32)
+        index.hnsw.efConstruction = 200
+        index.hnsw.efSearch = 50
+        index.add(embeddings)
+
+        parent = list(range(len(unique_names)))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            pa, pb = find(a), find(b)
+            if pa != pb:
+                parent[pb] = pa
+
+        for i, name in enumerate(unique_names):
+            D, I = index.search(embeddings[i:i+1], 50)
+            for score, idx in zip(D[0], I[0]):
+                if score >= threshold:
+                    union(i, idx)
+
+        clusters = {}
+        for i, name in enumerate(unique_names):
+            root = find(i)
+            clusters.setdefault(root, []).append(name)
+        alias = {}
+        for cluster in clusters.values():
+            if not cluster:
+                continue
+            canonical = max(cluster, key=lambda x: (freq[x], x))
+            alias.update({n: canonical for n in cluster})
+
+        return alias
+
+
+    def normalize_nodes(self, nodes, alias):
+        new_nodes = []
+        for node in nodes:
+            name = node.get("name")
+            if not name:
+                continue
+            new_nodes.append({
+                "name": alias.get(name, name),
+                "type": node.get("type", "unknown"),
+            })
+
+        return new_nodes
+    
+    
+    def normalize_edges(self, edges, alias):
+        new_edges = []
+        for edge in edges:
+            source, target = edge.get("source"), edge.get("target")
+            if not source or not target:
+                continue
+
+            source = alias.get(source, source)
+            target = alias.get(target, target)
+            new_edges.append({
+                "source": source, "target": target,
+                "relation": edge.get("relation", "related with").strip().lower()
+            })
+
+        return new_edges
+
+
+    def process_chunks(self, chunks, workers=16):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(tqdm(
+                executor.map(self.extract_nodes_and_edges, [c.text for c in chunks]),
+                total=len(chunks)
+            ))
+
+        nodes = []
+        edges = []
+        for n, e in results:
+            nodes.extend(n)
+            edges.extend(e)
+        return nodes, edges
+    
+    
+    def build_graph(self, chunks=None, nodes=None, edges=None):
+        if chunks is not None:
+            nodes, edges = self.process_chunks(chunks=chunks)
+        elif nodes is None or edges is None:
+            raise ValueError()
+
+        alias = self.normalize_names([n.get("name") for n in nodes if n.get("name")])
+        nodes = self.normalize_nodes(nodes, alias)
+        edges = self.normalize_edges(edges, alias)
+        self.add_nodes(nodes=nodes)
+        self.add_edges(edges=edges)
+
+        return self.graph
+        
+    
+    def save_graph(self, path):
+        data = json_graph.node_link_data(self.graph, edges="edges")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f)
         print(f"Graph saved: {path}")
@@ -167,19 +183,3 @@ Text:
         self.graph = json_graph.node_link_graph(data, edges="edges")
         print(f"Graph loaded: {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
         return self.graph
-
-
-class GraphIndex:
-    def __init__(self):
-        self.entity_to_chunks = {}
-        self.community_to_chunks = {}
-
-    def build(self, graph):
-        for node, node_data in graph.nodes(data=True):
-            chunk_ids = node_data.get("chunk_ids", [])
-            self.entity_to_chunks[node] = set(chunk_ids)
-
-            community = node_data.get("community")
-            if community is None:
-                continue
-            self.community_to_chunks.setdefault(community, set()).update(chunk_ids)

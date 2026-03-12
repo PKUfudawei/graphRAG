@@ -7,11 +7,10 @@ from collections import Counter
 
 
 class GraphBuilder:
-    def __init__(self, LLM=None, embed_model=None, graph=None, temperature=0.05):
+    def __init__(self, LLM=None, embed_model=None, graph=None):
         self.LLM = LLM
         self.embed_model = embed_model
         self.graph = nx.MultiDiGraph() if graph is None else graph
-        self.temperature = temperature
         
     
     def extract_nodes_and_edges(self, text):
@@ -36,10 +35,7 @@ Return the JSON following the schema:
 }}
 """
         try:
-            result = self.LLM.generate_response(
-                user_prompt=user_prompt, system_prompt=system_prompt, 
-                temperature=self.temperature, stream=False,
-            )
+            result = self.LLM.generate_response(user_prompt=user_prompt, system_prompt=system_prompt)
             result = result.lower().replace('_', ' ')
             try:
                 data = json.loads(result)

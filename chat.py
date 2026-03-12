@@ -7,7 +7,7 @@ def parse_arguments():
     parser.add_argument("-p", "--port", default="8000", help="Access LLM with the local port")
     parser.add_argument("-m", "--model", default="Qwen/Qwen3.5-9B", help="Choose the LLM", choices=["Qwen/Qwen3.5-9B"])
     parser.add_argument("-s", "--system_prompt", default="", help="The system prompt for LLM")
-    parser.add_argument("-t", "--enable_think", action="store_true", help="Enable thinking with -t")
+    parser.add_argument("-t", "--enable_thinking", action="store_true", help="Enable thinking with -t")
     return parser.parse_args()
 
 

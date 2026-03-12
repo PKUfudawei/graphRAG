@@ -7,19 +7,20 @@ class LLMInterface:
 
 
 class vLLMInterface(LLMInterface):
-    def __init__(self, base_url="http://localhost:8000/v1", model="Qwen/Qwen3.5-9B", enable_thinking=False):
+    def __init__(self, model="Qwen/Qwen3.5-9B", base_url="http://localhost:8000/v1", **kwargs):
+        print(f"LLM: {model} at {base_url}")
         self.base_url = base_url
         self.model = model
-        self.enable_thinking = enable_thinking
+        self.kwargs = kwargs
 
-    def generate_response(self, user_prompt, system_prompt="", **kwargs):
+    def generate_response(self, user_prompt, system_prompt=""):
         payload = {
-            "model": self.model, "temperature": kwargs.get('temperature', 0.5),
+            "model": self.model, "temperature": self.kwargs.get('temperature', 0.5),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
-            ], "stream": kwargs.get('stream', False),
-            "chat_template_kwargs": {"enable_thinking": self.enable_thinking}
+            ], "stream": self.kwargs.get('stream', False),
+            "chat_template_kwargs": {"enable_thinking": self.kwargs.get('enable_thinkng', False)},
         }
 
         response = requests.post(f"{self.base_url}/chat/completions", json=payload)

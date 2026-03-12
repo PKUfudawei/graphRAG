@@ -41,7 +41,7 @@ def build_communities(graph):
 def main():
     embed_model = SentenceTransformer("BAAI/bge-m3", device="cuda:1")
     print(f"Embedding model: BAAI/bge-m3 with {sum(p.numel() for p in embed_model.parameters()):,} parameters")
-    vllm = vLLMInterface(base_url="http://localhost:8000/v1", model="Qwen/Qwen3.5-9B", enable_thinking=False)
+    vllm = vLLMInterface(base_url="http://localhost:8000/v1", model="Qwen/Qwen3.5-9B", temperature=0.1, stream=False, enable_thinking=True)
     print(f"LLM model: Qwen/Qwen3.5-9B")
     chunks = chunk_file(path='data/book.txt', embed_model=embed_model)
     build_graph(chunks=chunks, LLM=vllm, embed_model=embed_model)

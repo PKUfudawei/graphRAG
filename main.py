@@ -1,6 +1,6 @@
 import os
 from openai import OpenAI
-from src.GraphRAG import GraphRAG
+#from src.GraphRAG import GraphRAG
 from src.Chunker import Chunker
 from src.GraphBuilder import GraphBuilder
 from src.CommunityAnalyzer import CommunityAnalyzer
@@ -13,16 +13,16 @@ if 'OPENROUTER_API_KEY' not in os.environ or 'OPENAI_API_KEY' not in os.environ:
 
 
 def build_chunks(file_path='data/book.txt'):
-    os.makedirs('checkpoints', exist_ok=True)
-
-    embed_model = SentenceTransformer("BAAI/bge-m3", device="cuda:3")
+    embed_model = SentenceTransformer(
+        "BAAI/bge-m3", device="cuda:3", 
+    )
     chunker = Chunker(
         chunk_size=512, overlap=50, encoding_model="cl100k_base", 
         embed_model=embed_model
     )
 
     chunker.chunk_file(
-        file_path=file_path, save_chunks_path='checkpoints/chunks.json', 
+        path=file_path, save_chunks_path='checkpoints/chunks.json', 
         save_index_path='checkpoints/faiss.index'
     )
 

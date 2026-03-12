@@ -58,7 +58,6 @@ class Chunker:
         for chunk, emb in tqdm(zip(chunks, embeddings), desc=f"Embedding chunks with model of {num_params:,} parameters", total=len(chunks)):
             chunk.embedding = emb
 
-        print(f"Added embeddings to {len(chunks)} chunks")
         return chunks
 
 

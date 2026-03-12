@@ -52,7 +52,7 @@ Return the JSON following the schema:
             ]
             return nodes, edges
         except Exception as e:
-            print(f"Error in entity extraction: {e}")
+            print(f"\tError in entity extraction: {e}")
             print(result)
             return [], []
     
@@ -108,8 +108,8 @@ Return the JSON following the schema:
         unique_names = list(freq.keys())
         embeddings = self.embed_model.encode(unique_names)
 
+        index = faiss.IndexHNSWFlat(embeddings.shape[1], 32, faiss.METRIC_INNER_PRODUCT)
         faiss.normalize_L2(embeddings)
-        index = faiss.IndexHNSWFlat(embeddings.shape[1], 32)
         index.hnsw.efConstruction = 200
         index.hnsw.efSearch = 50
         index.add(embeddings)
@@ -130,7 +130,7 @@ Return the JSON following the schema:
         for i, name in enumerate(unique_names):
             D, I = index.search(embeddings[i:i+1], 50)
             for score, idx in zip(D[0], I[0]):
-                if score >= threshold:
+                if score >= threshold and idx != i:
                     union(i, idx)
 
         clusters = {}
@@ -141,6 +141,10 @@ Return the JSON following the schema:
         for cluster in clusters.values():
             if not cluster:
                 continue
+            #if len(cluster) > 5:
+            #    for n in cluster:
+            #        alias[n] = n
+            #    continue
             canonical = max(cluster, key=lambda x: (freq[x], x))
             alias.update({n: canonical for n in cluster})
 
@@ -177,17 +181,27 @@ Return the JSON following the schema:
         return new_edges
     
     
-    def build_graph(self, chunks=None, nodes=None, edges=None):
-        if chunks is not None:
-            nodes, edges = self.process_chunks(chunks=chunks)
-        elif nodes is None or edges is None:
-            raise ValueError()
+    def build_graph(self, chunks):
+        nodes, edges = self.process_chunks(chunks=chunks)
+        node_names = set([n.get('name') for n in nodes])
+        num_nodes = len(node_names)
+        print(f"\tExtracted {num_nodes} unique nodes from chunks")
+        for e in edges:
+            if e["source"] not in node_names:
+                nodes.append({"name": e["source"], "type": "unknown"})
+            if e["target"] not in node_names:
+                nodes.append({"name": e["target"], "type": "unknown"})
+        full_num_nodes = len(set([n.get('name') for n in nodes]))
+        print(f"\tAdded {full_num_nodes-num_nodes} nodes referenced in edges but absent from node list")
+        print(f"\tBefore merging: {full_num_nodes} nodes")
         alias = self.normalize_names([n.get("name") for n in nodes if n.get("name")])
         merged_nodes = self.normalize_nodes(nodes, alias)
+        print(f"\tAfter merging: {len(set([n.get('name') for n in merged_nodes]))} nodes")
         merged_edges = self.normalize_edges(edges, alias)
+        
         self.add_nodes(nodes=merged_nodes)
         self.add_edges(edges=merged_edges)
-        print(f"Graph built: {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
+        print(f"\tGraph built: {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
         return self.graph
         
@@ -197,7 +211,7 @@ Return the JSON following the schema:
         data = json_graph.node_link_data(graph if graph else self.graph, edges="edges")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f)
-        print(f"Graph saved: {path}")
+        print(f"\tGraph saved: {path}")
 
 
     def load_graph(self, path):

@@ -68,7 +68,7 @@ class Chunker:
         } for chunk in chunks]
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(chunks_data, f, ensure_ascii=False, indent=2)
-        print(f"Saved {len(chunks)} chunks to {path}")
+        print(f"\tSaved {len(chunks)} chunks to {path}")
     
     
     def load_chunks(self, path):
@@ -95,7 +95,7 @@ class Chunker:
     def save_index(self, faiss_index, path):
         os.makedirs(os.path.dirname(path if path else '.'), exist_ok=True)
         faiss.write_index(faiss_index, path)
-        print(f"FAISS index saved to {path}")
+        print(f"\tFAISS index saved to {path}")
 
 
     def load_index(self, path):

@@ -4,21 +4,26 @@ from colorama import init, Fore, Style
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--port", default="8000", help="Access LLM with the local port")
+    parser.add_argument("-m", "--model", default="Qwen/Qwen3.5-9B", help="Choose the LLM", choices=["Qwen/Qwen3.5-9B"])
+    parser.add_argument("-s", "--system_prompt", default="", help="The system prompt for LLM")
     parser.add_argument("-t", "--enable_think", action="store_true", help="Enable thinking with -t")
-    parser.add_argument("-m", "--model", default="Qwen/Qwen3.5-9B", help="Specify model with -m")
     return parser.parse_args()
 
 
 def chat(query, args):
     response = requests.post(
-        "http://localhost:8000/v1/chat/completions",
+        f"http://localhost:{args.port}/v1/chat/completions",
         json={
             "model": args.model,
-            "messages": [{"role": "user", "content": query}],
+            "messages": [
+                {"role": "system", "content": args.system_prompt},
+                {"role": "user", "content": query}
+            ],
             "chat_template_kwargs": {"enable_thinking": args.enable_think},
         }
-    ).json()
-    return response
+    )
+    return response.json()
 
 
 def main():
@@ -29,6 +34,7 @@ def main():
     try:
         while True:
             query = input(f"{Fore.BLUE}{Style.BRIGHT}[{count}] Input: {Style.RESET_ALL}") or "你是谁"
+            
             start = time.time()
             result = chat(query=query, args=args)
             end = time.time()

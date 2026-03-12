@@ -7,26 +7,25 @@ class LLMInterface:
         raise NotImplementedError
 
 
-class OllamaLLM(LLMInterface):
-    def __init__(self, model="qwen2.5:7b", url="http://localhost:11434/api/chat"):
+class vLLMInterface(LLMInterface):
+    def __init__(self, base_url="http://localhost:8000/v1", model="Qwen/Qwen3.5-9B", enable_thinking=False):
+        self.base_url = base_url
         self.model = model
-        self.url = url
+        self.enable_thinking = enable_thinking
 
     def generate_json(self, system_prompt, user_prompt):
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            "format": "json",
-            "stream": False,
+            "chat_template_kwargs": {"enable_thinking": self.enable_thinking}
         }
 
-        r = requests.post(self.url, json=payload)
-        content = r.json()["message"]["content"]
-
-        return json.loads(content)
+        response = requests.post(f"{self.base_url}/chat/completions", json=payload)
+        response.raise_for_status()
+        return response.json()
 
 
 class LLMwithAPI(LLMInterface):

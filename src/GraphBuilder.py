@@ -1,4 +1,4 @@
-import json, faiss
+import json, faiss, os, re
 import networkx as nx
 from networkx.readwrite import json_graph
 from tqdm import tqdm
@@ -7,32 +7,57 @@ from collections import Counter
 
 
 class GraphBuilder:
-    def __init__(self, extract_model=None, embed_model=None, graph=None):
-        self.extract_model = extract_model
+    def __init__(self, LLM=None, embed_model=None, graph=None, temperature=0.05):
+        self.LLM = LLM
         self.embed_model = embed_model
         self.graph = nx.MultiDiGraph() if graph is None else graph
+        self.temperature = temperature
         
     
     def extract_nodes_and_edges(self, text):
-        system_prompt = "You extract entities and relations from text."
+        system_prompt = """
+You are a precise entity and relation extraction assistant.
+Your task is to extract all relevant entities and the relationships between them from a given text.
+- Only return valid JSON.
+- Nodes should have fields "name" and "type" (no underscores).
+- Edges should have fields "source", "target", and "relation" (no underscores).
+- Use lowercase and concise relation names.
+- Do not include any explanations, comments, or text outside the JSON.
+- Make sure to return the complete JSON, do not truncate or omit any part.
+"""
         user_prompt = f"""
-Extract entities and relationships.
+Text: 
+{text}
 
-Return ONLY valid JSON.
-Schema:
+Return the JSON following the schema:
 {{
 "nodes":[{{"name":"","type":""}}],
 "edges":[{{"source":"","target":"","relation":""}}]
 }}
-
-Text: 
-{text}
 """
         try:
-            result = self.extract_model.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
-            return result.get('nodes', []), result.get('edges', [])
+            result = self.LLM.generate_response(
+                user_prompt=user_prompt, system_prompt=system_prompt, 
+                temperature=self.temperature, stream=False,
+            )
+            result = result.lower().replace('_', ' ')
+            try:
+                data = json.loads(result)
+            except json.JSONDecodeError:
+                match = re.search(r'\{.*\}', result, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                else:
+                    data = {}
+            nodes = [n for n in data.get("nodes", []) if isinstance(n, dict) and "name" in n]
+            edges = [
+                e for e in data.get("edges", []) 
+                if isinstance(e, dict) and "source" in e and "target" in e and "relation" in e
+            ]
+            return nodes, edges
         except Exception as e:
             print(f"Error in entity extraction: {e}")
+            print(result)
             return [], []
     
     
@@ -63,13 +88,30 @@ Text:
                 self.graph[source][target][relation]['weight'] += 1
         
         return self.graph
+    
+    
+    def process_chunks(self, chunks, workers=16):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(tqdm(
+                executor.map(self.extract_nodes_and_edges, [c.text for c in chunks]),
+                total=len(chunks), desc="Extracting nodes and edges from chunks",
+            ))
+
+        nodes = []
+        edges = []
+        for n, e in results:
+            nodes.extend(n)
+            edges.extend(e)
+        if not nodes:
+            raise ValueError("Found no node from chunks!")
+        return nodes, edges
 
 
     def normalize_names(self, names, threshold=0.9):
         freq = Counter(names)
         unique_names = list(freq.keys())
         embeddings = self.embed_model.encode(unique_names)
-        
+
         faiss.normalize_L2(embeddings)
         index = faiss.IndexHNSWFlat(embeddings.shape[1], 32)
         index.hnsw.efConstruction = 200
@@ -119,7 +161,6 @@ Text:
                 "name": alias.get(name, name),
                 "type": node.get("type", "unknown"),
             })
-
         return new_nodes
     
     
@@ -134,25 +175,10 @@ Text:
             target = alias.get(target, target)
             new_edges.append({
                 "source": source, "target": target,
-                "relation": edge.get("relation", "related with").strip().lower()
+                "relation": edge.get("relation", "related with").strip().lower().replace('_', ' ')
             })
 
         return new_edges
-
-
-    def process_chunks(self, chunks, workers=16):
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(tqdm(
-                executor.map(self.extract_nodes_and_edges, [c.text for c in chunks]),
-                total=len(chunks)
-            ))
-
-        nodes = []
-        edges = []
-        for n, e in results:
-            nodes.extend(n)
-            edges.extend(e)
-        return nodes, edges
     
     
     def build_graph(self, chunks=None, nodes=None, edges=None):
@@ -160,18 +186,19 @@ Text:
             nodes, edges = self.process_chunks(chunks=chunks)
         elif nodes is None or edges is None:
             raise ValueError()
-
         alias = self.normalize_names([n.get("name") for n in nodes if n.get("name")])
-        nodes = self.normalize_nodes(nodes, alias)
-        edges = self.normalize_edges(edges, alias)
-        self.add_nodes(nodes=nodes)
-        self.add_edges(edges=edges)
+        merged_nodes = self.normalize_nodes(nodes, alias)
+        merged_edges = self.normalize_edges(edges, alias)
+        self.add_nodes(nodes=merged_nodes)
+        self.add_edges(edges=merged_edges)
+        print(f"Graph built: {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
         return self.graph
         
     
-    def save_graph(self, path):
-        data = json_graph.node_link_data(self.graph, edges="edges")
+    def save_graph(self, path, graph=None):
+        os.makedirs(os.path.dirname(path if path else '.'), exist_ok=True)
+        data = json_graph.node_link_data(graph if graph else self.graph, edges="edges")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f)
         print(f"Graph saved: {path}")

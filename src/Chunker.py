@@ -21,7 +21,7 @@ class Chunk:
 
 
 class Chunker:
-    def __init__(self, chunk_size=512, overlap=50, encoding_model="cl100k_base", embed_model=None):
+    def __init__(self, chunk_size=256, overlap=32, encoding_model="cl100k_base", embed_model=None):
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.encoder = tiktoken.get_encoding(encoding_model)
@@ -54,21 +54,10 @@ class Chunker:
         embeddings = self.embed_model.encode(
             texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=True
         )
-        num_params = sum(p.numel() for p in self.embed_model.parameters())
-        for chunk, emb in tqdm(zip(chunks, embeddings), desc=f"Embedding chunks with model of {num_params:,} parameters", total=len(chunks)):
+        for chunk, emb in tqdm(zip(chunks, embeddings), desc=f"Embedding chunks", total=len(chunks)):
             chunk.embedding = emb
 
         return chunks
-
-
-    def build_faiss_index(self, chunks, batch_size=10_000):
-        faiss_index = faiss.IndexFlatIP(chunks[0].embedding.shape[0])
-        for i in tqdm(range(0, len(chunks), batch_size), desc="Building FAISS index"):
-            batch_chunks = chunks[i:i+batch_size]
-            embeddings = np.vstack([chunk.embedding for chunk in batch_chunks]).astype("float32")
-            faiss_index.add(embeddings)
-
-        return faiss_index
 
 
     def save_chunks(self, chunks, path):
@@ -91,6 +80,16 @@ class Chunker:
         ) for data in chunks_data]
         print(f"Loaded {len(chunks)} chunks from {path}")
         return chunks
+
+
+    def build_faiss_index(self, chunks, batch_size=10_000):
+        faiss_index = faiss.IndexFlatIP(chunks[0].embedding.shape[0])
+        for i in tqdm(range(0, len(chunks), batch_size), desc="Building FAISS index"):
+            batch_chunks = chunks[i:i+batch_size]
+            embeddings = np.vstack([chunk.embedding for chunk in batch_chunks]).astype("float32")
+            faiss_index.add(embeddings)
+
+        return faiss_index
 
 
     def save_index(self, faiss_index, path):

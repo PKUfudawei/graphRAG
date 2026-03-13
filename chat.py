@@ -20,7 +20,7 @@ def chat(query, args):
                 {"role": "system", "content": args.system_prompt},
                 {"role": "user", "content": query}
             ],
-            "chat_template_kwargs": {"enable_thinking": args.enable_think},
+            "chat_template_kwargs": {"enable_thinking": args.enable_thinking},
         }
     )
     return response.json()
@@ -40,7 +40,7 @@ def main():
             end = time.time()
 
             print(f"{Fore.CYAN}{args.model}{Style.RESET_ALL}{Fore.YELLOW} in {(end-start):.1f} s:{Style.RESET_ALL} ")
-            print(f"{Fore.LIGHTGREEN_EX}{result['choices'][0]['message']['content']}{Style.RESET_ALL}\n")
+            print(f"{Fore.LIGHTGREEN_EX}{result['choices'][0]['message']['content']}{Style.RESET_ALL}")
             count += 1
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}Exited{Style.RESET_ALL}")

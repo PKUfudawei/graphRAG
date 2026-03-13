@@ -61,7 +61,7 @@ class Chunker:
 
 
     def save_chunks(self, chunks, path):
-        os.makedirs(os.path.dirname(path if path else '.'), exist_ok=True)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         chunks_data = [{
             'id': chunk.id, 'text': chunk.text, 'start_token': chunk.start_token, 'end_token': chunk.end_token, 
             'token_count': chunk.token_count, 'text_count': chunk.text_count, 'source': chunk.source,
@@ -93,7 +93,7 @@ class Chunker:
 
 
     def save_index(self, faiss_index, path):
-        os.makedirs(os.path.dirname(path if path else '.'), exist_ok=True)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         faiss.write_index(faiss_index, path)
         print(f"\tFAISS index saved to {path}")
 

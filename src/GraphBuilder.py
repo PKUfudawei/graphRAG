@@ -207,7 +207,7 @@ Return the JSON following the schema:
         
     
     def save_graph(self, path, graph=None):
-        os.makedirs(os.path.dirname(path if path else '.'), exist_ok=True)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         data = json_graph.node_link_data(graph if graph else self.graph, edges="edges")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f)

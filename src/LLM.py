@@ -20,7 +20,7 @@ class vLLMInterface(LLMInterface):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ], "stream": self.kwargs.get('stream', False),
-            "chat_template_kwargs": {"enable_thinking": self.kwargs.get('enable_thinkng', False)},
+            "chat_template_kwargs": {"enable_thinking": self.kwargs.get('enable_thinking', False)},
         }
 
         response = requests.post(f"{self.base_url}/chat/completions", json=payload)

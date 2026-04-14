@@ -1,0 +1,37 @@
+[project]
+name = "graphrag"
+version = "0.1.0"
+description = "GraphRAG project"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.10",
+    "langchain-core>=0.1.0",
+    "langchain-huggingface>=0.0.1",
+    "langchain-text-splitters>=0.0.1",
+    "langchain-openai>=0.0.1",
+    "httpx[socks]>=0.27.0",
+    "faiss-cpu>=1.7.4",
+    "sentence-transformers>=2.2.0",
+    "unstructured>=0.12.0",
+    "pypdf>=3.0.0",
+    "transformers>=4.40.0,<4.50.0",
+    "accelerate>=0.20.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "torchaudio>=2.0.0",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+index = [
+    { url = "https://download.pytorch.org/whl/cu121", name = "pytorch-cu121" },
+    { url = "https://pypi.org/simple" },
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
+torchaudio = { index = "pytorch-cu121" }

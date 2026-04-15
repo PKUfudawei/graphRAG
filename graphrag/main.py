@@ -1,542 +1,378 @@
 """
-Knowledge Graph Pipeline Demo - 知识图谱构建与分析全流程演示
-
-This script demonstrates the complete workflow of building and analyzing
-a knowledge graph from text documents.
-
-本脚本演示从文本文档构建和分析知识图谱的完整流程：
-1. 实体与关系提取
-2. 知识图谱构建
-3. 节点去重
-4. 社区发现
-5. 社区总结
-6. 结果存储
+GraphRAG 系统主模块 - 知识图谱 RAG
+支持构建图索引和基于社区的检索
 """
+
 import os
-from typing import List, Dict, Any, Optional, Tuple
+import sys
+import argparse
+from typing import List, Optional
+from glob import glob
+from pathlib import Path
+from tqdm import tqdm
 
 import networkx as nx
+from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
 
-from models.graph_models import GraphDocumentWrapper, CommunitySummary
-from graphrag.index.entity_extractor import EntityExtractor, ParallelEntityExtractor
-from graphrag.index.graph_builder import GraphBuilder
-from graphrag.index.node_deduplicator import NodeDeduplicator
-from analyzers.community_detector import CommunityDetector
-from analyzers.community_summarizer import CommunitySummarizer
-from storage.graph_storage import GraphStorage
-from storage.embedding_index import EmbeddingIndex
+# 添加父目录到路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from graphrag.index import get_entity_extractor, GraphBuilder, NodeDeduplicator
+from graphrag.analyze import CommunityDetector, CommunitySummarizer
+from graphrag.retrieve import get_graph_retriever
+from graphrag.storage import GraphStorage, EmbeddingIndexManager
+from graphrag.models import GraphDocumentWrapper, CommunitySummary
+
+# 复用 rag 模块
+from rag.index import get_indexer as get_text_indexer
+from rag.index import get_embedder
 
 
 # ==================== 配置参数 ====================
-
-# 并发配置
 MAX_WORKERS = 16
-
-# 节点去重配置
 DEDUP_THRESHOLD = 0.9
-
-# 社区发现配置
 MAX_COMMUNITY_SIZE = 50
 
 
-# ==================== 阶段 1: 实体与关系提取 ====================
+# ==================== 图构建流程 ====================
 
-def extract_entities_parallel(
+def build_graph_from_texts(
     texts: List[str],
-    sources: Optional[List[str]],
-    llm,
-    max_workers: int = MAX_WORKERS
-) -> List[GraphDocumentWrapper]:
+    sources: Optional[List[str]] = None,
+    llm=None,
+    embed_model=None,
+    deduplicate: bool = True,
+) -> nx.MultiDiGraph:
     """
-    并行提取实体和关系。
+    从文本构建知识图谱
 
     Args:
         texts: 文本列表
-        sources: 可选的源标识列表
-        llm: LangChain 语言模型实例
-        max_workers: 最大并发数
-
-    Returns:
-        GraphDocumentWrapper 列表
-    """
-    extractor = ParallelEntityExtractor(llm, max_workers)
-    return extractor.extract_parallel(texts, sources)
-
-
-def extract_entities_single(
-    text: str,
-    source: Optional[str] = None,
-    llm = None
-) -> GraphDocumentWrapper:
-    """
-    从单个文本中提取实体和关系。
-
-    Args:
-        text: 输入文本
-        source: 可选的源标识
-        llm: LangChain 语言模型实例
-
-    Returns:
-        GraphDocumentWrapper 实例
-    """
-    extractor = EntityExtractor(llm)
-    return extractor.extract(text, source)
-
-
-# ==================== 阶段 2: 图构建 ====================
-
-def build_graph_from_documents(
-    documents: List[GraphDocumentWrapper]
-) -> nx.MultiDiGraph:
-    """
-    从文档列表构建知识图谱。
-
-    Args:
-        documents: GraphDocumentWrapper 列表
-
-    Returns:
-        NetworkX MultiDiGraph
-    """
-    builder = GraphBuilder()
-    builder.build_from_documents(documents)
-    return builder.get_graph()
-
-
-# ==================== 阶段 3: 节点去重 ====================
-
-def find_node_aliases(
-    node_names: List[str],
-    embed_model,
-    threshold: float = DEDUP_THRESHOLD
-) -> Dict[str, str]:
-    """
-    查找相似节点并生成别名映射。
-
-    Args:
-        node_names: 节点名称列表
+        sources: 源标识列表
+        llm: LangChain LLM 实例
         embed_model: 嵌入模型
-        threshold: 相似度阈值
+        deduplicate: 是否去重
 
     Returns:
-        别名映射字典 {别名：规范名称}
+        NetworkX 图
     """
-    deduplicator = NodeDeduplicator(embed_model, threshold)
-    return deduplicator.find_aliases(node_names)
+    if llm is None:
+        from rag.llm import get_llm
+        llm = get_llm()
+    if embed_model is None:
+        embed_model = get_embedder()
 
-
-def apply_alias_map(
-    graph: nx.MultiDiGraph,
-    alias_map: Dict[str, str]
-) -> nx.MultiDiGraph:
-    """
-    将别名映射应用到图上，合并相似节点。
-
-    Args:
-        graph: 原始图
-        alias_map: 别名映射字典
-
-    Returns:
-        去重后的新图
-    """
-    # 创建新图
-    new_graph = nx.MultiDiGraph()
-
-    # 构建节点映射
-    node_mapping = {}
-    for node in graph.nodes():
-        canonical = alias_map.get(node, node)
-        node_mapping[node] = canonical
-
-    # 合并节点
-    for node in graph.nodes():
-        canonical = node_mapping[node]
-        if canonical not in new_graph:
-            new_graph.add_node(canonical, **graph.nodes[node])
-        else:
-            # 累加权重
-            new_graph.nodes[canonical]['weight'] += graph.nodes[node].get('weight', 1)
-
-    # 合并边
-    for source, target, key, data in graph.edges(keys=True, data=True):
-        new_source = node_mapping[source]
-        new_target = node_mapping[target]
-
-        # 跳过自环
-        if new_source == new_target:
-            continue
-
-        if not new_graph.has_edge(new_source, new_target):
-            new_graph.add_edge(new_source, new_target, key=key, **data)
-        else:
-            # 检查是否已有相同关系类型的边
-            edge_found = False
-            for k in new_graph[new_source][new_target]:
-                if k == key:
-                    new_graph[new_source][new_target][k]['weight'] += data.get('weight', 1)
-                    edge_found = True
-                    break
-            if not edge_found:
-                new_graph.add_edge(new_source, new_target, key=key, **data)
-
-    return new_graph
-
-
-# ==================== 阶段 4: 社区发现 ====================
-
-def detect_communities(
-    graph: nx.MultiDiGraph,
-    max_community_size: int = MAX_COMMUNITY_SIZE
-) -> Tuple[nx.MultiDiGraph, Dict[int, List[str]]]:
-    """
-    检测图中的社区结构。
-
-    Args:
-        graph: 知识图谱
-        max_community_size: 社区最大大小
-
-    Returns:
-        (标注社区后的图，社区字典 {community_id: [节点列表]})
-    """
-    detector = CommunityDetector(max_community_size)
-    graph, communities, _ = detector.detect_communities(graph)
-    return graph, communities
-
-
-# ==================== 阶段 5: 社区总结 ====================
-
-def summarize_communities(
-    graph: nx.MultiDiGraph,
-    communities: Dict[int, List[str]],
-    llm,
-    embed_model,
-    max_workers: int = MAX_WORKERS
-) -> List[CommunitySummary]:
-    """
-    为每个社区生成文本总结和嵌入向量。
-
-    Args:
-        graph: 知识图谱
-        communities: 社区字典
-        llm: LangChain 语言模型实例
-        embed_model: 嵌入模型
-        max_workers: 最大并发数
-
-    Returns:
-        CommunitySummary 列表
-    """
-    summarizer = CommunitySummarizer(llm, embed_model)
-    return summarizer.summarize_communities(graph, communities, max_workers)
-
-
-# ==================== 阶段 6: 存储 ====================
-
-def save_graph(graph: nx.MultiDiGraph, path: str) -> str:
-    """保存图为 JSON 格式"""
-    return GraphStorage.save_graph(graph, path)
-
-
-def save_community_metadata(
-    community_summaries: List[CommunitySummary],
-    path: str
-) -> str:
-    """保存社区元数据"""
-    return GraphStorage.save_community_metadata(community_summaries, path)
-
-
-def save_node_index(
-    graph: nx.MultiDiGraph,
-    embed_model,
-    path: str
-) -> str:
-    """构建并保存节点嵌入索引"""
-    node_index, node_ids = EmbeddingIndex.build_node_index(
-        list(graph.nodes()), embed_model
-    )
-    return EmbeddingIndex.save_index(node_index, path, node_ids, "nodes")
-
-
-def save_community_index(
-    community_summaries: List[CommunitySummary],
-    path: str
-) -> str:
-    """构建并保存社区嵌入索引"""
-    community_index, community_ids = EmbeddingIndex.build_community_index(
-        community_summaries
-    )
-    return EmbeddingIndex.save_index(community_index, path, community_ids, "communities")
-
-
-def load_graph(path: str) -> nx.MultiDiGraph:
-    """加载保存的图"""
-    return GraphStorage.load_graph(path)
-
-
-def load_community_metadata(path: str) -> List[Dict[str, Any]]:
-    """加载社区元数据"""
-    return GraphStorage.load_community_metadata(path)
-
-
-# ==================== 完整流程 ====================
-
-def build_knowledge_graph(
-    text_chunks: List[str],
-    sources: Optional[List[str]],
-    llm,
-    embed_model,
-    deduplicate: bool = True,
-    max_workers: int = MAX_WORKERS
-) -> nx.MultiDiGraph:
-    """
-    构建知识图谱的完整流程。
-
-    Args:
-        text_chunks: 文本块列表
-        sources: 可选的源标识列表
-        llm: LangChain 语言模型实例
-        embed_model: 嵌入模型
-        deduplicate: 是否进行节点去重
-        max_workers: 最大并发数
-
-    Returns:
-        构建完成的知识图谱
-    """
+    # 阶段 1: 实体提取
     print("=" * 60)
     print("阶段 1: 实体与关系提取")
     print("=" * 60)
-    documents = extract_entities_parallel(text_chunks, sources, llm, max_workers)
 
-    # 统计提取结果
+    extractor = get_entity_extractor(llm)
+    documents = []
+
+    for text, source in tqdm(zip(texts, sources or [None] * len(texts)), desc="Extracting"):
+        doc = extractor.extract(text, source)
+        documents.append(doc)
+
     total_nodes = sum(len(doc.nodes) for doc in documents)
     total_edges = sum(len(doc.edges) for doc in documents)
     print(f"\t从 {len(documents)} 个文档中提取了 {total_nodes} 个节点和 {total_edges} 条边")
 
+    # 阶段 2: 图构建
     print("\n" + "=" * 60)
     print("阶段 2: 知识图谱构建")
     print("=" * 60)
-    graph = build_graph_from_documents(documents)
+
+    builder = GraphBuilder()
+    builder.build_from_documents(documents)
+    graph = builder.get_graph()
     print(f"\t图构建完成：{graph.number_of_nodes()} 个节点，{graph.number_of_edges()} 条边")
 
+    # 阶段 3: 节点去重
     if deduplicate:
         print("\n" + "=" * 60)
         print("阶段 3: 节点去重")
         print("=" * 60)
+
+        deduplicator = NodeDeduplicator(embed_model, DEDUP_THRESHOLD)
         node_names = list(graph.nodes())
-        alias_map = find_node_aliases(node_names, embed_model)
-        graph = apply_alias_map(graph, alias_map)
+        alias_map = deduplicator.find_aliases(node_names)
+
+        # 应用别名映射
+        new_graph = nx.MultiDiGraph()
+        node_mapping = {node: alias_map.get(node, node) for node in graph.nodes()}
+
+        for node in graph.nodes():
+            canonical = node_mapping[node]
+            if canonical not in new_graph:
+                new_graph.add_node(canonical, **graph.nodes[node])
+            else:
+                new_graph.nodes[canonical]["weight"] += graph.nodes[node].get("weight", 1)
+
+        for source, target, key, data in graph.edges(keys=True, data=True):
+            new_source = node_mapping[source]
+            new_target = node_mapping[target]
+            if new_source == new_target:
+                continue
+            if not new_graph.has_edge(new_source, new_target):
+                new_graph.add_edge(new_source, new_target, key=key, **data)
+            else:
+                for k in new_graph[new_source][new_target]:
+                    if k == key:
+                        new_graph[new_source][new_target][k]["weight"] += data.get("weight", 1)
+                        break
+                else:
+                    new_graph.add_edge(new_source, new_target, key=key, **data)
+
+        graph = new_graph
         print(f"\t去重完成：{graph.number_of_nodes()} 个节点，{graph.number_of_edges()} 条边")
-        print(f"\t合并了 {len(node_names) - graph.number_of_nodes()} 个重复节点")
 
     return graph
 
 
-def analyze_knowledge_graph(
+def analyze_graph(
     graph: nx.MultiDiGraph,
-    llm,
-    embed_model,
-    max_workers: int = MAX_WORKERS
-) -> Tuple[Dict[int, List[str]], List[CommunitySummary]]:
+    llm=None,
+    embed_model=None,
+) -> tuple:
     """
-    分析知识图谱：社区发现和总结。
-
-    Args:
-        graph: 知识图谱
-        llm: LangChain 语言模型实例
-        embed_model: 嵌入模型
-        max_workers: 最大并发数
+    分析知识图谱：社区发现和总结
 
     Returns:
-        (社区字典，社区总结列表)
+        (communities, community_summaries)
     """
+    if llm is None:
+        from rag.llm import get_llm
+        llm = get_llm()
+    if embed_model is None:
+        embed_model = get_embedder()
+
+    # 阶段 4: 社区发现
     print("\n" + "=" * 60)
     print("阶段 4: 社区发现")
     print("=" * 60)
-    graph, communities = detect_communities(graph)
-    print(f"\t发现 {len(communities)} 个社区")
-    for comm_id, nodes in sorted(communities.items()):
-        print(f"\t社区 {comm_id}: {len(nodes)} 个节点")
 
+    detector = CommunityDetector(MAX_COMMUNITY_SIZE)
+    graph, communities, _ = detector.detect_communities(graph)
+    print(f"\t发现 {len(communities)} 个社区")
+
+    # 阶段 5: 社区总结
     print("\n" + "=" * 60)
     print("阶段 5: 社区总结")
     print("=" * 60)
-    community_summaries = summarize_communities(graph, communities, llm, embed_model, max_workers)
+
+    summarizer = CommunitySummarizer(llm, embed_model)
+    community_summaries = summarizer.summarize_communities(graph, communities, MAX_WORKERS)
     print(f"\t完成 {len(community_summaries)} 个社区的总结")
 
     return communities, community_summaries
 
 
-def save_results(
+def save_graph_results(
     graph: nx.MultiDiGraph,
     community_summaries: List[CommunitySummary],
     embed_model,
-    base_path: str
-) -> Dict[str, str]:
-    """
-    保存所有结果。
-
-    Args:
-        graph: 知识图谱
-        community_summaries: 社区总结列表
-        embed_model: 嵌入模型
-        base_path: 基础保存路径
-
-    Returns:
-        保存文件路径字典
-    """
-    print("\n" + "=" * 60)
-    print("阶段 6: 结果存储")
-    print("=" * 60)
+    output_path: str,
+) -> dict:
+    """保存图和相关索引"""
+    os.makedirs(output_path, exist_ok=True)
 
     paths = {}
 
     # 保存图
-    graph_path = os.path.join(base_path, "graph.json")
-    paths["graph"] = save_graph(graph, graph_path)
+    graph_path = os.path.join(output_path, "graph.json")
+    GraphStorage.save_graph(graph, graph_path)
+    paths["graph"] = graph_path
 
     # 保存社区元数据
     if community_summaries:
-        meta_path = os.path.join(base_path, "communities.json")
-        paths["community_metadata"] = save_community_metadata(community_summaries, meta_path)
+        meta_path = os.path.join(output_path, "communities.json")
+        GraphStorage.save_community_metadata(community_summaries, meta_path)
+        paths["community_metadata"] = meta_path
+
+        # 保存社区索引
+        community_index_path = os.path.join(output_path, "community_index.faiss")
+        community_index, community_ids = EmbeddingIndexManager.build_community_index(
+            community_summaries
+        )
+        EmbeddingIndexManager.save_index(community_index, community_index_path, community_ids, "communities")
+        paths["community_index"] = community_index_path
 
     # 保存节点索引
-    node_index_path = os.path.join(base_path, "node_index.faiss")
-    paths["node_index"] = save_node_index(graph, embed_model, node_index_path)
+    node_index_path = os.path.join(output_path, "node_index.faiss")
+    node_index, node_ids = EmbeddingIndexManager.build_node_index(
+        list(graph.nodes()), embed_model
+    )
+    EmbeddingIndexManager.save_index(node_index, node_index_path, node_ids, "nodes")
+    paths["node_index"] = node_index_path
 
-    # 保存社区索引
-    if community_summaries:
-        community_index_path = os.path.join(base_path, "community_index.faiss")
-        paths["community_index"] = save_community_index(community_summaries, community_index_path)
-
-    print(f"\n所有结果已保存到：{base_path}")
+    print(f"\n所有结果已保存到：{output_path}")
     return paths
 
 
-def get_graph_stats(
-    graph: nx.MultiDiGraph,
-    communities: Optional[Dict[int, List[str]]] = None
-) -> Dict[str, Any]:
-    """
-    获取图的统计信息。
+# ==================== RAG 查询 ====================
 
-    Args:
-        graph: 知识图谱
-        communities: 可选的社区字典
+def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
+    """根据上下文生成答案"""
+    if llm is None:
+        from rag.llm import get_llm
+        llm = get_llm()
 
-    Returns:
-        统计信息字典
-    """
-    stats = {
-        "num_nodes": graph.number_of_nodes(),
-        "num_edges": graph.number_of_edges()
+    context_text = "\n\n".join(
+        f"[Community {i+1}]: {doc.page_content}" for i, doc in enumerate(context_docs)
+    )
+    prompt = f"""根据以下知识图谱社区信息回答问题。如果信息不足，请说明不知道。
+
+社区信息:
+{context_text}
+
+问题：{query}
+
+回答："""
+    return llm.invoke([HumanMessage(content=prompt)]).content
+
+
+def graphrag_query(query: str, retriever, llm=None, embed_model=None, top_k: int = 3) -> dict:
+    """GraphRAG 查询"""
+    if embed_model is None:
+        embed_model = get_embedder()
+
+    docs = retriever.retrieve(query, embed_model, top_k=top_k)
+
+    if not docs:
+        return {
+            "query": query,
+            "answer": "未找到相关的知识图谱信息。",
+            "references": [],
+        }
+
+    answer = generate_answer(query, docs, llm)
+
+    return {
+        "query": query,
+        "answer": answer,
+        "references": [
+            {
+                "community_id": d.metadata.get("community_id", "unknown"),
+                "score": d.metadata.get("score", 0),
+                "nodes": d.metadata.get("nodes", [])[:5],  # 只显示前 5 个节点
+            }
+            for d in docs
+        ],
     }
 
-    if communities:
-        stats["num_communities"] = len(communities)
-        stats["community_sizes"] = {cid: len(nodes) for cid, nodes in communities.items()}
 
-    return stats
+# ==================== CLI 接口 ====================
+
+def build_index(
+    files: List[str],
+    output_path: str,
+    embed_device: str = "cuda:0",
+    chunk_size: int = 512,
+    overlap: int = 50,
+) -> None:
+    """构建图索引（支持 Markdown 和纯文本）"""
+    embed_model = get_embedder(device=embed_device)
+
+    # 加载并分块文本
+    text_indexer = get_text_indexer(chunk_size=chunk_size, overlap=overlap, embed_device=embed_device)
+    all_docs, _ = text_indexer.index_files(files, build_vectorstore=False)
+
+    texts = [doc.page_content for doc in all_docs]
+    sources = [doc.metadata.get("source", "unknown") for doc in all_docs]
+
+    print(f"\n加载了 {len(texts)} 个文本块")
+
+    # 构建图
+    graph = build_graph_from_texts(texts, sources, embed_model=embed_model)
+
+    # 分析图
+    communities, community_summaries = analyze_graph(graph, embed_model=embed_model)
+
+    # 保存结果
+    save_graph_results(graph, community_summaries, embed_model, output_path)
 
 
-# ==================== 演示入口 ====================
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="GraphRAG 系统 - 知识图谱 RAG")
+    parser.add_argument("--build", type=str, help="构建图索引：指定文件路径或 glob 模式")
+    parser.add_argument("--query", type=str, help="单次查询")
+    parser.add_argument("--interactive", action="store_true", help="交互模式")
+    parser.add_argument("--index", type=str, default="./data/graph_index", help="图索引路径")
+    parser.add_argument("--top-k", type=int, default=3, help="返回的社区数量")
+    parser.add_argument("--embed-device", type=str, default="cuda:0", help="嵌入模型设备")
+    parser.add_argument("--chunk-size", type=int, default=512, help="文本块大小")
+    parser.add_argument("--overlap", type=int, default=50, help="文本块重叠")
 
-def main(
-    text_chunks: List[str],
-    llm,
-    embed_model,
-    output_dir: str = "./output",
-    sources: Optional[List[str]] = None,
-    skip_build: bool = False,
-    skip_analysis: bool = False
-):
-    """
-    知识图谱构建与分析主函数。
+    return parser.parse_args(), parser
 
-    Args:
-        text_chunks: 文本块列表
-        llm: LangChain 语言模型实例
-        embed_model: 嵌入模型
-        output_dir: 输出目录
-        sources: 可选的源标识列表
-        skip_build: 跳过构建阶段（使用已保存的图）
-        skip_analysis: 跳过分析阶段
-    """
-    print("\n" + "#" * 60)
-    print("# 知识图谱构建与分析全流程演示")
-    print("#" * 60 + "\n")
 
-    graph = None
-    communities = None
-    community_summaries = None
+def main():
+    args, parser = parse_arguments()
 
-    # 检查是否有已保存的结果
-    if skip_build and os.path.exists(os.path.join(output_dir, "graph.json")):
-        print("加载已保存的图...")
-        graph = load_graph(os.path.join(output_dir, "graph.json"))
-        if os.path.exists(os.path.join(output_dir, "communities.json")):
-            community_summaries = load_community_metadata(
-                os.path.join(output_dir, "communities.json")
-            )
+    if not any([args.build, args.query, args.interactive]):
+        parser.print_help()
+        return
 
-    # 阶段 1-3: 构建知识图谱
-    if not skip_build:
-        graph = build_knowledge_graph(
-            text_chunks, sources, llm, embed_model,
-            deduplicate=True, max_workers=MAX_WORKERS
+    # 构建模式
+    if args.build:
+        files = glob(args.build)
+        if not files:
+            print(f"Error: No files matched '{args.build}'")
+            return
+        build_index(
+            files,
+            args.index,
+            args.embed_device,
+            args.chunk_size,
+            args.overlap,
         )
+        return
 
-    # 阶段 4-5: 分析知识图谱
-    if not skip_analysis and graph is not None:
-        communities, community_summaries = analyze_knowledge_graph(
-            graph, llm, embed_model, max_workers=MAX_WORKERS
-        )
+    # 查询/交互模式
+    index_path = args.index
+    if not os.path.exists(os.path.join(index_path, "community_index.faiss")):
+        print(f"Error: Graph index not found at {index_path}")
+        return
 
-    # 阶段 6: 保存结果
-    if graph is not None:
-        os.makedirs(output_dir, exist_ok=True)
-        save_results(graph, community_summaries or [], embed_model, output_dir)
+    # 加载检索器
+    retriever = get_graph_retriever(
+        index_path=os.path.join(index_path, "community_index.faiss"),
+        metadata_path=os.path.join(index_path, "communities.json"),
+        graph_path=os.path.join(index_path, "graph.json"),
+    )
+    embed_model = get_embedder(device=args.embed_device)
 
-    # 打印统计信息
-    if graph is not None:
-        print("\n" + "=" * 60)
-        print("统计信息")
-        print("=" * 60)
-        stats = get_graph_stats(graph, communities)
-        for key, value in stats.items():
-            if key != "community_sizes":
-                print(f"\t{key}: {value}")
-            else:
-                print(f"\t{key}:")
-                for cid, size in value.items():
-                    print(f"\t\t社区 {cid}: {size} 个节点")
+    # 单次查询
+    if args.query:
+        result = graphrag_query(args.query, retriever, embed_model=embed_model, top_k=args.top_k)
+        print(f"\nAnswer: {result['answer']}")
+        if result["references"]:
+            print("\nReferences:")
+            for ref in result["references"]:
+                print(f"  - Community {ref['community_id']} (score: {ref['score']:.4f})")
+        return
 
-    return graph, communities, community_summaries
+    # 交互模式
+    if args.interactive:
+        print("Interactive mode. Type 'quit' to exit.")
+        while True:
+            try:
+                q = input("\nQuestion: ").strip()
+                if q.lower() in ["quit", "exit", "q"]:
+                    break
+                if not q:
+                    continue
+                result = graphrag_query(q, retriever, embed_model=embed_model, top_k=args.top_k)
+                print(f"\nAnswer: {result['answer']}")
+                if result["references"]:
+                    print("\nReferences:")
+                    for ref in result["references"]:
+                        print(f"  - Community {ref['community_id']} (score: {ref['score']:.4f})")
+            except (KeyboardInterrupt, EOFError):
+                break
 
 
 if __name__ == "__main__":
-    # 演示用法示例
-    print("""
-使用方法:
-
-from main import main
-
-# 准备文本
-text_chunks = [
-    "Albert Einstein was a theoretical physicist who developed the theory of relativity.",
-    "Einstein won the Nobel Prize in Physics in 1921.",
-    # ... 更多文本
-]
-
-# 初始化 LLM 和嵌入模型
-from langchain_community.llms import ollama
-from sentence_transformers import SentenceTransformer
-
-llm = ollama.llms.Ollama(model="qwen2.5")
-embed_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-
-# 运行完整流程
-graph, communities, summaries = main(
-    text_chunks=text_chunks,
-    llm=llm,
-    embed_model=embed_model,
-    output_dir="./output"
-)
-""")
+    main()

@@ -1,5 +1,5 @@
 """
-RAG 系统主模块 - 使用 index/ 和 retrieve/ 模块
+RAG 系统主模块 - 使用 indexer 和 retriever 模块
 """
 
 import os
@@ -13,21 +13,65 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from index import get_indexer
-from retrieve import get_retriever
-from llm import get_llm
+from indexer import get_indexer
+from models.reranker import get_reranker
+from models.llm import get_llm
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="RAG 系统")
+    parser.add_argument("-b", "--build", type=str, help="构建索引：指定文件路径或 glob 模式")
+    parser.add_argument("-q", "--query", type=str, help="单次查询")
+    parser.add_argument("-i", "--interact", action="store_true", help="交互模式")
+    parser.add_argument("-v", "--vectorstore", type=str, default="../data/vectorstore",
+                        help="向量存储路径")
+    parser.add_argument("--chunk_size", type=int, default=512)
+    parser.add_argument("--overlap", type=int, default=50)
+    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--embed_device", type=str, default="cuda:0")
+    parser.add_argument("--rerank_device", type=str, default="cuda:1")
+
+    args = parser.parse_args()
+    return args, parser
+
+
+def get_retriever(vectorstore, top_k=5, reranker_device="cuda:0"):
+    """创建检索器"""
+    retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
+    reranker = get_reranker(device=reranker_device, top_k=top_k)
+
+    def retrieve(query: str):
+        docs = retriever.invoke(query)
+        if docs:
+            docs = reranker.rerank(query, docs)
+        return docs
+
+    retrieve.retrieve = retrieve
+    return retrieve
 
 
 def build_index(files: List[str], vectorbase_path: str, embed_device: str = "cuda:0",
                 chunk_size: int = 512, overlap: int = 50) -> None:
-    """构建向量索引（支持 Markdown 和纯文本）"""
+    """构建向量索引（支持纯文本文件）"""
     indexer = get_indexer(chunk_size=chunk_size, overlap=overlap, embed_device=embed_device)
 
-    # 使用 index_files 方法，自动支持 Markdown 和纯文本
-    documents, vectorstore = indexer.index_files(files, build_vectorstore=True)
+    # 读取文件并创建 Document 对象
+    documents = []
+    for file_path in tqdm(files, desc="Loading files"):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        documents.append(Document(
+            page_content=content,
+            metadata={"source": file_path}
+        ))
+
+    # 索引文档并构建向量库
+    chunks = indexer.index_documents(documents)
+    vectorstore = indexer.build_vectorstore(chunks)
     indexer.save_vectorstore(vectorstore, vectorbase_path)
-    print(f"Built index with {len(documents)} chunks, saved to {vectorbase_path}")
+    print(f"Built index with {len(chunks)} chunks, saved to {vectorbase_path}")
 
 
 def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
@@ -66,26 +110,9 @@ def rag_query(query: str, retriever, llm=None, max_context_docs: int = 3) -> dic
     }
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="RAG 系统")
-    parser.add_argument("--build", type=str, help="构建索引：指定文件路径或 glob 模式")
-    parser.add_argument("--query", type=str, help="单次查询")
-    parser.add_argument("--interactive", action="store_true", help="交互模式")
-    parser.add_argument("--vectorstore", type=str, default="./data/vectorstore",
-                        help="向量存储路径")
-    parser.add_argument("--chunk-size", type=int, default=512)
-    parser.add_argument("--overlap", type=int, default=50)
-    parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--embed-device", type=str, default="cuda:0")
-    parser.add_argument("--rerank-device", type=str, default="cuda:1")
-
-    args = parser.parse_args()
-    return args, parser
-
-
 def main():
     args, parser = parse_arguments()
-    if not any([args.build, args.query, args.interactive]):
+    if not any([args.build, args.query, args.interact]):
         parser.print_help()
         return
 
@@ -106,7 +133,7 @@ def main():
     indexer = get_indexer(embed_device=args.embed_device)
     vectorstore = indexer.load_vectorstore(args.vectorstore)
     retriever = get_retriever(vectorstore, top_k=args.top_k, reranker_device=args.rerank_device)
-    llm = get_llm(model="Qwen/Qwen3.5-27B", base_url="http://localhost:8000/v1", api_key="EMPTY")
+    llm = get_llm(streaming=True)
 
     # 单次查询
     if args.query:
@@ -115,7 +142,7 @@ def main():
         return
 
     # 交互模式
-    if args.interactive:
+    if args.interact:
         print("Interactive mode. Type 'quit' to exit.")
         while True:
             try:

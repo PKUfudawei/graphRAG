@@ -20,10 +20,14 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "torchaudio>=2.0.0",
+    "python-louvain>=0.16",
+    "neo4j>=5.0.0",
 ]
 
 [dependency-groups]
-dev = []
+dev = [
+    "pytest>=9.0.3",
+]
 
 [tool.uv]
 index = [

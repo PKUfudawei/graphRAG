@@ -7,46 +7,40 @@ from sentence_transformers import CrossEncoder
 class SimpleReranker:
     """简单的重排序器，基于 CrossEncoder"""
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3", device: str = "cuda:0"):
-        self.model = CrossEncoder(model_name, device=device)
+    def __init__(self, model: str = "BAAI/bge-reranker-v2-m3", device: str = "cuda:0", top_k=None):
+        self.model = CrossEncoder(model, device=device)
+        self.top_k = top_k
 
-    def compress_documents(self, query: str, documents: List[Document]):
+    def rerank(self, query: str, documents: List[Document]):
         """对文档进行重排序"""
         texts = [(query, doc.page_content) for doc in documents]
         scores = self.model.predict(texts)
         scored_docs = list(zip(documents, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
+
+        if self.top_k is not None:
+            scored_docs = scored_docs[:self.top_k]
+
         return [doc for doc, _ in scored_docs]
 
-    def _rerank(self, query: str, documents: List[Document], top_n: int = 3):
+    def rerank_with_score(self, query: str, documents: List[Document]):
         """返回带分数的重排序结果"""
         texts = [(query, doc.page_content) for doc in documents]
         scores = self.model.predict(texts)
         scored_docs = list(zip(documents, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        if self.top_k is not None:
+            scored_docs = scored_docs[:self.top_k]
 
-        from dataclasses import dataclass
-        @dataclass
-        class RankedDocument:
-            document: Document
-            relevance_score: float
+        return scored_docs
+    
 
-        return [RankedDocument(doc, score) for doc, score in scored_docs[:top_n]]
-
-
-def get_reranker(device: str = "cuda:0") -> SimpleReranker:
-    """
-    获取重排序器实例
-
-    Args:
-        device:
-
-    Returns:
-        SimpleReranker 实例
-    """
+def get_reranker(model="BAAI/bge-reranker-v2-m3", device='cuda:0', top_k=3):
     return SimpleReranker(
-        model_name="BAAI/bge-reranker-v2-m3",
+        model=model,
         device=device,
+        top_k=top_k
     )
 
 
@@ -64,10 +58,10 @@ if __name__ == "__main__":
     documents = [Document(page_content=doc) for doc in raw_documents]
 
     # 创建 reranker 实例
-    reranker = get_reranker(device="cuda:0")
+    reranker = get_reranker()
 
     # 使用 reranker 对文档进行重排序
-    result = reranker.compress_documents(
+    result = reranker.rerank(
         query=query,
         documents=documents,
     )
@@ -78,13 +72,12 @@ if __name__ == "__main__":
         print(f"  {doc.page_content[:50]}...")
 
     # 获取带分数的详细结果
-    result_with_scores = reranker._rerank(
+    result_with_scores = reranker.rerank_with_score(
         query=query,
         documents=documents,
-        top_n=3,
     )
 
-    print("\nTop 3 文档及分数:")
+    print(f"\nTop {reranker.top_k} 文档及分数:")
     for item in result_with_scores:
-        print(f"  分数：{item.relevance_score:.4f}")
-        print(f"  内容：{item.document.page_content[:60]}...", end='\n')
+        print(f"  分数：{item[1]:.4f}")
+        print(f"  内容：{item[0].page_content[:60]}...", end='\n')

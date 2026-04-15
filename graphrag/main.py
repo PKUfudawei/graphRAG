@@ -18,9 +18,9 @@ from typing import List, Dict, Any, Optional, Tuple
 import networkx as nx
 
 from models.graph_models import GraphDocumentWrapper, CommunitySummary
-from builders.entity_extractor import EntityExtractor, ParallelEntityExtractor
-from builders.graph_builder import GraphBuilder
-from builders.node_deduplicator import NodeDeduplicator
+from graphrag.index.entity_extractor import EntityExtractor, ParallelEntityExtractor
+from graphrag.index.graph_builder import GraphBuilder
+from graphrag.index.node_deduplicator import NodeDeduplicator
 from analyzers.community_detector import CommunityDetector
 from analyzers.community_summarizer import CommunitySummarizer
 from storage.graph_storage import GraphStorage

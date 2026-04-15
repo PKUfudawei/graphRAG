@@ -1,345 +1,134 @@
 """
-RAG 系统主模块 - 使用函数形式演示 Vanilla RAG 流程
-
-流程说明:
-1. 文本分块 (Chunking) - 将长文本分割成小块
-2. 文本嵌入 (Embedding) - 将文本转换为向量 (GPU 0)
-3. 构建索引 (Indexing) - 使用 FAISS 构建向量索引
-4. 检索 (Retrieval) - 根据查询检索相关文档
-5. 重排序 (Reranking) - 对检索结果重排序 (GPU 1)
-6. 生成答案 (Generation) - LLM 根据上下文生成答案 (GPU 2)
+RAG 系统主模块 - 使用 index/ 和 retrieve/ 模块
 """
 
 import os
-from typing import List, Optional
+import sys
+import argparse
+from typing import List
+from glob import glob
+from tqdm import tqdm
+
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
-from langchain_community.vectorstores import FAISS
 
-try:
-    from rag.chunker import Chunker
-    from rag.embedder import get_embeddings
-    from rag.retriever import Retriever
-    from rag.reranker import get_reranker
-    from rag.llm import llm
-except ImportError:
-    from chunker import Chunker
-    from embedder import get_embeddings
-    from retriever import Retriever
-    from reranker import get_reranker
-    from llm import llm
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from index import get_indexer
+from retrieve import get_retriever
+from llm import get_llm
 
 
-# ============================================================================
-# 步骤 1: 初始化组件
-# ============================================================================
+def build_index(files: List[str], vectorbase_path: str, embed_device: str = "cuda:0",
+                chunk_size: int = 512, overlap: int = 50) -> None:
+    """构建向量索引（支持 Markdown 和纯文本）"""
+    indexer = get_indexer(chunk_size=chunk_size, overlap=overlap, embed_device=embed_device)
 
-def initialize_components(embed_device="cuda:0", rerank_device="cuda:1"):
-    """
-    初始化 RAG 所需的所有组件
+    # 使用 index_files 方法，自动支持 Markdown 和纯文本
+    documents, vectorstore = indexer.index_files(files, build_vectorstore=True)
+    indexer.save_vectorstore(vectorstore, vectorbase_path)
+    print(f"Built index with {len(documents)} chunks, saved to {vectorbase_path}")
 
-    Args:
-        embed_device: Embedding 模型使用的 GPU
-        rerank_device: Reranker 模型使用的 GPU
 
-    Returns:
-        dict: 包含所有组件的字典
-    """
-    print(f"GPU 分配：Embedding={embed_device}, Reranker={rerank_device}")
+def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
+    """根据上下文生成答案"""
+    if llm is None:
+        llm = get_llm()
 
-    # 初始化 Embedding 模型
-    embeddings = get_embeddings(device=embed_device)
-
-    # 初始化 Chunker
-    chunker = Chunker(
-        chunk_size=500,
-        overlap=50,
-        embed_model="BAAI/bge-m3",
+    context_text = "\n\n".join(
+        f"[Doc {i+1}]: {doc.page_content}" for i, doc in enumerate(context_docs)
     )
-    chunker.embeddings = embeddings  # 注入 embeddings
-
-    # 初始化 Reranker
-    reranker = get_reranker(device=rerank_device)
-
-    return {
-        "embeddings": embeddings,
-        "chunker": chunker,
-        "reranker": reranker,
-    }
-
-
-# ============================================================================
-# 步骤 2: 文本分块
-# ============================================================================
-
-def chunk_texts(texts: List[str], sources: Optional[List[str]] = None,
-                chunker: Chunker = None) -> List[Document]:
-    """
-    将文本列表分块为文档
-
-    Args:
-        texts: 文本列表
-        sources: 文档来源列表（可选）
-        chunker: Chunker 实例
-
-    Returns:
-        List[Document]: 分块后的文档列表
-    """
-    if sources is None:
-        sources = [f"document_{i}" for i in range(len(texts))]
-
-    all_documents = []
-    for text, source in zip(texts, sources):
-        docs = chunker.chunk_text(text, source=source)
-        all_documents.extend(docs)
-
-    print(f"文本分块完成，共 {len(all_documents)} 个文档块")
-    return all_documents
-
-
-# ============================================================================
-# 步骤 3: 构建向量索引
-# ============================================================================
-
-def build_vectorstore(documents: List[Document], chunker: Chunker) -> FAISS:
-    """
-    构建 FAISS 向量索引
-
-    Args:
-        documents: 文档列表
-        chunker: 包含 embeddings 的 Chunker 实例
-
-    Returns:
-        FAISS: 向量存储实例
-    """
-    vectorstore = chunker.build_vectorstore(documents)
-    print("向量索引构建完成")
-    return vectorstore
-
-
-# ============================================================================
-# 步骤 4: 初始化检索器
-# ============================================================================
-
-def create_retriever(vectorstore: FAISS, reranker, top_k: int = 5) -> Retriever:
-    """
-    创建检索器
-
-    Args:
-        vectorstore: FAISS 向量存储
-        reranker: 重排序器
-        top_k: 默认返回的文档数量
-
-    Returns:
-        Retriever: 检索器实例
-    """
-    return Retriever(
-        vectorstore=vectorstore,
-        reranker=reranker,
-        k=top_k,
-    )
-
-
-# ============================================================================
-# 步骤 5: 检索文档
-# ============================================================================
-
-def retrieve_documents(query: str, retriever: Retriever,
-                       k: Optional[int] = None) -> List[Document]:
-    """
-    检索相关文档
-
-    Args:
-        query: 查询文本
-        retriever: 检索器实例
-        k: 返回的文档数量
-
-    Returns:
-        List[Document]: 检索到的文档列表
-    """
-    docs = retriever.retrieve(query, k=k)
-    print(f"  检索到 {len(docs)} 个相关文档")
-    return docs
-
-
-# ============================================================================
-# 步骤 6: 生成答案
-# ============================================================================
-
-def generate_answer(query: str, context_docs: List[Document]) -> str:
-    """
-    根据查询和上下文生成答案
-
-    Args:
-        query: 查询文本
-        context_docs: 上下文文档列表
-
-    Returns:
-        str: 生成的答案
-    """
-    # 构建上下文
-    context_text = "\n\n".join([
-        f"【文档 {i+1}】:\n{doc.page_content}"
-        for i, doc in enumerate(context_docs)
-    ])
-
-    # 构建提示
-    prompt = f"""你是一个有帮助的 AI 助手。请根据以下参考信息回答问题。
-如果参考信息中不包含答案，请诚实地说明你不知道。
+    prompt = f"""根据以下参考信息回答问题。如果信息不足，请说明不知道。
 
 参考信息:
 {context_text}
 
 问题：{query}
 
-请根据参考信息回答："""
-
-    # 调用 LLM
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return response.content
+回答："""
+    return llm.invoke([HumanMessage(content=prompt)]).content
 
 
-# ============================================================================
-# 完整 RAG 流程
-# ============================================================================
-
-def vanilla_rag_query(query: str, retriever: Retriever,
-                      max_context_docs: int = 3) -> dict:
-    """
-    完整的 Vanilla RAG 查询流程
-
-    Args:
-        query: 查询文本
-        retriever: 检索器实例
-        max_context_docs: 用于生成答案的最大文档数量
-
-    Returns:
-        dict: 包含答案和参考文档的字典
-    """
-    # 检索文档
-    retrieved_docs = retrieve_documents(query, retriever)
-
-    # 限制上下文文档数量
-    context_docs = retrieved_docs[:max_context_docs]
-    context_texts = [doc.page_content for doc in context_docs]
-
-    # 生成答案
-    answer = generate_answer(query, context_docs)
+def rag_query(query: str, retriever, llm=None, max_context_docs: int = 3) -> dict:
+    """RAG 查询"""
+    docs = retriever.retrieve(query)
+    context_docs = docs[:max_context_docs]
+    answer = generate_answer(query, context_docs, llm)
 
     return {
         "query": query,
         "answer": answer,
         "references": [
-            {
-                "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-                "source": doc.metadata.get("source", "unknown"),
-            }
-            for doc in context_docs
+            {"content": d.page_content[:200] + "..." if len(d.page_content) > 200 else d.page_content,
+             "source": d.metadata.get("source", "unknown")}
+            for d in context_docs
         ],
     }
 
 
-# ============================================================================
-# 辅助函数：保存和加载索引
-# ============================================================================
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="RAG 系统")
+    parser.add_argument("--build", type=str, help="构建索引：指定文件路径或 glob 模式")
+    parser.add_argument("--query", type=str, help="单次查询")
+    parser.add_argument("--interactive", action="store_true", help="交互模式")
+    parser.add_argument("--vectorstore", type=str, default="./data/vectorstore",
+                        help="向量存储路径")
+    parser.add_argument("--chunk-size", type=int, default=512)
+    parser.add_argument("--overlap", type=int, default=50)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--embed-device", type=str, default="cuda:0")
+    parser.add_argument("--rerank-device", type=str, default="cuda:1")
 
-def save_vectorstore(vectorstore: FAISS, chunker: Chunker, path: str):
-    """保存向量存储"""
-    chunker.save_vectorstore(vectorstore, path)
-    print(f"索引已保存到：{path}")
+    args = parser.parse_args()
+    return args, parser
 
 
-def load_vectorstore(path: str, chunker: Chunker):
-    """加载向量存储"""
-    print(f"加载向量存储：{path}")
-    return chunker.load_vectorstore(path)
+def main():
+    args, parser = parse_arguments()
+    if not any([args.build, args.query, args.interactive]):
+        parser.print_help()
+        return
 
+    # 构建模式
+    if args.build:
+        files = glob(args.build)
+        if not files:
+            print(f"Error: No files matched '{args.build}'")
+            return
+        build_index(files, args.vectorstore, args.embed_device, args.chunk_size, args.overlap)
+        return
 
-# ============================================================================
-# 演示：完整的 RAG 流程
-# ============================================================================
+    # 查询/交互模式
+    if not os.path.exists(args.vectorstore):
+        print(f"Error: Vectorstore not found at {args.vectorstore}")
+        return
 
-def demo_vanilla_rag():
-    """演示完整的 Vanilla RAG 流程"""
-    print("=" * 60)
-    print("Vanilla RAG 流程演示")
-    print("=" * 60)
+    indexer = get_indexer(embed_device=args.embed_device)
+    vectorstore = indexer.load_vectorstore(args.vectorstore)
+    retriever = get_retriever(vectorstore, top_k=args.top_k, reranker_device=args.rerank_device)
+    llm = get_llm(model="Qwen/Qwen3.5-27B", base_url="http://localhost:8000/v1", api_key="EMPTY")
 
-    # 测试数据
-    test_texts = [
-        """
-        Python 是一种高级编程语言，由 Guido van Rossum 于 1989 年发明。
-        Python 的设计哲学强调代码的可读性和简洁性。
-        Python 拥有丰富而强大的库，常被昵称为胶水语言。
-        """,
-        """
-        机器学习是人工智能的一个子领域，它使计算机能够在没有明确编程的情况下学习。
-        深度学习是机器学习的一个子集，使用多层神经网络来处理复杂的问题。
-        监督学习是机器学习的一种，使用标记的数据来训练模型。
-        """,
-        """
-        北京是中国的首都，位于中国北部，是中国的政治、文化、国际交往和科技创新中心。
-        北京拥有 3000 多年的建城史和 850 多年的建都史。
-        2008 年，北京成功举办了夏季奥林匹克运动会。
-        """,
-    ]
-    test_sources = ["python_intro.txt", "ml_intro.txt", "beijing_intro.txt"]
+    # 单次查询
+    if args.query:
+        result = rag_query(args.query, retriever, llm)
+        print(f"Answer: {result['answer']}")
+        return
 
-    # 步骤 1: 初始化组件
-    print("\n[步骤 1] 初始化组件...")
-    components = initialize_components(embed_device=0, rerank_device=1)
-    chunker = components["chunker"]
-    reranker = components["reranker"]
-
-    # 步骤 2: 文本分块
-    print("\n[步骤 2] 文本分块...")
-    documents = chunk_texts(test_texts, test_sources, chunker)
-
-    # 步骤 3: 构建向量索引
-    print("\n[步骤 3] 构建向量索引...")
-    vectorstore = build_vectorstore(documents, chunker)
-
-    # 步骤 4: 创建检索器
-    print("\n[步骤 4] 创建检索器...")
-    retriever = create_retriever(vectorstore, reranker, top_k=3)
-    print("检索器创建完成")
-
-    # 步骤 5: 执行查询（包含检索和生成）
-    print("\n" + "=" * 60)
-    print("[步骤 5] 执行查询")
-    print("=" * 60)
-
-    queries = [
-        "Python 语言是谁发明的？",
-        "什么是深度学习？",
-        "北京举办过什么重要的国际赛事？",
-    ]
-
-    for query in queries:
-        print(f"\n{'-' * 60}")
-        print(f"查询：{query}")
-        print("-" * 60)
-
-        result = vanilla_rag_query(query, retriever, max_context_docs=3)
-
-        print(f"\n答案：{result['answer']}")
-
-        print("\n参考文档:")
-        for i, ref in enumerate(result['references'], 1):
-            print(f"  [{i}] 来源：{ref['source']}")
-            print(f"      内容：{ref['content'][:100]}...")
-
-    # 保存索引
-    print("\n" + "=" * 60)
-    print("[额外] 保存索引...")
-    print("=" * 60)
-    os.makedirs("./data", exist_ok=True)
-    save_vectorstore(vectorstore, chunker, "./data/vectorstore_demo")
-
-    print("\n" + "=" * 60)
-    print("演示完成!")
-    print("=" * 60)
+    # 交互模式
+    if args.interactive:
+        print("Interactive mode. Type 'quit' to exit.")
+        while True:
+            try:
+                q = input("\nQuestion: ").strip()
+                if q.lower() in ['quit', 'exit', 'q']:
+                    break
+                if not q:
+                    continue
+                result = rag_query(q, retriever, llm)
+                print(f"Answer: {result['answer']}")
+            except (KeyboardInterrupt, EOFError):
+                break
 
 
 if __name__ == "__main__":
-    demo_vanilla_rag()
+    main()

@@ -3,7 +3,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.embeddings import Embeddings
 
 
-def get_embeddings(device="cuda:0") -> HuggingFaceEmbeddings:
+def get_embedder(model="BAAI/bge-m3", device="cuda:0") -> HuggingFaceEmbeddings:
     """
     获取嵌入模型实例
 
@@ -13,17 +13,16 @@ def get_embeddings(device="cuda:0") -> HuggingFaceEmbeddings:
     Returns:
         HuggingFaceEmbeddings 实例
     """
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-m3",
+    return HuggingFaceEmbeddings(
+        model_name=model,
         model_kwargs={"device": device},
         encode_kwargs={"normalize_embeddings": True}
     )
-    return embeddings
 
 
 if __name__ == "__main__":
     # 获取嵌入模型实例
-    embeddings = get_embeddings()
+    embeddings = get_embedder()
 
     # The queries and documents to embed
     queries = [
@@ -46,10 +45,10 @@ if __name__ == "__main__":
     doc_array = np.array(document_embeddings)
 
     # Normalize embeddings
-    query_norm = query_array / (np.linalg.norm(query_array, axis=1, keepdims=True) + 1e-8)
-    doc_norm = doc_array / (np.linalg.norm(doc_array, axis=1, keepdims=True) + 1e-8)
+    print("Norm of query:", np.linalg.norm(query_array, axis=-1))
+    print("Norm of doc:", np.linalg.norm(doc_array, axis=-1))
 
-    similarity = np.dot(query_norm, doc_norm.T)
+    similarity = query_array.dot(doc_array.T)
     print(similarity)
     # Similar to: tensor([[0.7646, 0.1414],
     #                     [0.1355, 0.6000]])

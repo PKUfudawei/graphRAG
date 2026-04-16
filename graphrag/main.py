@@ -5,8 +5,6 @@ GraphRAG 系统主模块 - 使用 GraphRAGIndexer 和 GraphRAGRetriever
 import os
 import sys
 import argparse
-import pickle
-from typing import List
 from glob import glob
 from tqdm import tqdm
 
@@ -45,21 +43,17 @@ def parse_arguments():
 
 
 def build_index(
-    files: List[str],
+    files,
     storage_path: str,
     chunk_size: int = 512,
     overlap: int = 50,
     embedding_model: str = "BAAI/bge-m3"
 ) -> None:
-    """构建 GraphRAG 索引（向量 + 图谱）"""
+    """构建 GraphRAG 索引（向量 + 图谱 + 实体 embedding）"""
     print(f"Building GraphRAG index from {len(files)} files...")
 
     # 创建索引器
-    indexer = get_graphrag_indexer(
-        chunk_size=chunk_size,
-        overlap=overlap,
-        embedding_model_name=embedding_model
-    )
+    indexer = get_graphrag_indexer()
 
     # 读取文件并创建 Document 对象
     documents = []
@@ -71,53 +65,45 @@ def build_index(
             metadata={"source": file_path}
         ))
 
-    # 索引文档（向量 + 图谱）
-    print("Indexing documents...")
-    chunks, graph_docs = indexer.index_texts(
-        [doc.page_content for doc in documents],
-        metadatas=[doc.metadata for doc in documents],
-        reset=True,
-        index_vector=True,
-        index_graph=True
-    )
+    # Step 1: 分块
+    print("\n[Step 1] Chunking documents...")
+    chunks = indexer.index_documents(documents)
+    print(f"  Generated {len(chunks)} chunks")
 
-    # 保存索引
-    os.makedirs(storage_path, exist_ok=True)
+    # Step 2: 构建图谱（提取 -> 对齐 -> 建图）
+    print("\n[Step 2] Building knowledge graph...")
+    indexer.clear_graph()
+    graph_result = indexer.build_graph_from_chunks(chunks)
+    print(f"  Graph: {graph_result['entities']} entities, {graph_result['relationships']} relationships")
 
-    # 保存向量索引
-    vector_index_path = os.path.join(storage_path, "vector_index.pkl")
-    with open(vector_index_path, "wb") as f:
-        pickle.dump({
-            "vector_index": indexer._vector_index,
-            "vector_metadata": indexer._vector_metadata,
-            "entity_vector_index": indexer._entity_vector_index,
-            "entity_metadata": indexer._entity_metadata,
-            "embedding_model": embedding_model
-        }, f)
+    # Step 3: 实体向量索引
+    print("\n[Step 3] Indexing entities...")
+    entity_count = indexer.index_entities()
+    print(f"  Indexed {entity_count} entities")
 
-    print(f"Built index with {len(chunks)} chunks and {len(graph_docs)} graph documents")
-    print(f"Saved to {storage_path}")
+    # Step 4: 保存索引
+    print(f"\n[Step 4] Saving index to {storage_path}...")
+    indexer.save(storage_path)
+
+    print("\n" + "=" * 60)
+    print("Index built successfully!")
+    print(f"  Chunks: {len(chunks)}")
+    print(f"  Entities: {graph_result['entities']}")
+    print(f"  Relationships: {graph_result['relationships']}")
+    print("=" * 60)
 
 
-def load_index(storage_path: str) -> tuple:
+def load_index(storage_path: str):
     """加载 GraphRAG 索引"""
-    vector_index_path = os.path.join(storage_path, "vector_index.pkl")
-    if not os.path.exists(vector_index_path):
-        raise FileNotFoundError(f"Index not found at {vector_index_path}")
+    if not os.path.exists(storage_path):
+        raise FileNotFoundError(f"Index not found at {storage_path}")
 
-    with open(vector_index_path, "rb") as f:
-        data = pickle.load(f)
-
-    return (
-        data["vector_index"],
-        data["vector_metadata"],
-        data["entity_vector_index"],
-        data["entity_metadata"],
-        data.get("embedding_model", "BAAI/bge-m3")
-    )
+    indexer = get_graphrag_indexer()
+    indexer.load(storage_path)
+    return indexer
 
 
-def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
+def generate_answer(query: str, context_docs, llm=None) -> str:
     """根据上下文生成答案"""
     if llm is None:
         llm = get_llm()
@@ -185,26 +171,19 @@ def main():
         return
 
     # 查询/交互模式
-    if not os.path.exists(args.storage):
-        print(f"Error: Index not found at {args.storage}")
-        return
-
-    # 加载索引
     print("Loading index...")
     try:
-        (vector_index, vector_metadata, entity_vector_index,
-         entity_metadata, embedding_model) = load_index(args.storage)
+        indexer = load_index(args.storage)
     except Exception as e:
         print(f"Error loading index: {e}")
         return
 
     # 创建检索器
     retriever = get_graphrag_retriever(
-        vector_index=vector_index,
-        vector_metadata=vector_metadata,
-        entity_vector_index=entity_vector_index,
-        entity_metadata=entity_metadata,
-        embedding_model_name=embedding_model
+        graph_builder=indexer.graph_builder,
+        entity_index=indexer._entity_index,
+        entity_metadata=indexer._entity_metadata,
+        embedding=indexer.embedding
     )
 
     llm = get_llm(streaming=True)

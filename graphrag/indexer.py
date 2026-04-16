@@ -2,6 +2,8 @@
 GraphRAG Indexer - 整合向量索引和知识图谱索引
 """
 from typing import List, Optional
+import numpy as np
+import faiss
 
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument
@@ -16,6 +18,7 @@ class GraphRAGIndexer(Indexer):
     工作流程:
     1. index_documents(): 分块文档（继承自 Indexer）
     2. build_graph_from_chunks(): 从 chunks 提取实体 -> 对齐 -> 建图
+    3. index_entities(): 为实体生成 embedding 并建立向量索引
     """
 
     def __init__(
@@ -25,6 +28,8 @@ class GraphRAGIndexer(Indexer):
     ):
         super().__init__(chunker=chunker, embedding=embedding)
         self._graph_builder = None
+        self._entity_index = None  # FAISS index for entities
+        self._entity_metadata = []  # List of (entity_id, node_type, chunk_ids)
 
     @property
     def graph_builder(self):
@@ -43,9 +48,109 @@ class GraphRAGIndexer(Indexer):
         """
         return self.graph_builder.build_from_documents(chunks)
 
+    def index_entities(self, reset: bool = False) -> int:
+        """为实体生成 embedding 并建立 FAISS 向量索引。
+
+        参考 rag.indexer.index_documents 的设计。
+
+        Args:
+            reset: 是否重置索引。默认 False。
+
+        Returns:
+            索引的实体数量。
+        """
+        if reset or self._entity_index is None:
+            self._entity_index = None
+            self._entity_metadata = []
+
+        # 从 builder 获取所有实体
+        entity_names = list(self.graph_builder.graph.nodes())
+
+        if not entity_names:
+            print("No entities to index.")
+            return 0
+
+        # 收集实体元数据
+        for entity in entity_names:
+            node_data = self.graph_builder.graph.nodes[entity]
+            self._entity_metadata.append({
+                "entity_id": entity,
+                "node_type": node_data.get("node_type", "Entity"),
+                "chunk_ids": node_data.get("chunk_ids", [])
+            })
+
+        # 生成 embeddings
+        print(f"Generating embeddings for {len(entity_names)} entities...")
+        embeddings = self.embedding.encode(entity_names)
+
+        # 创建 FAISS 索引
+        dim = embeddings.shape[1]
+        if self._entity_index is None:
+            self._entity_index = faiss.IndexFlatIP(dim)  # 内积相似度
+        self._entity_index.add(embeddings)
+
+        print(f"Indexed {len(entity_names)} entities with {dim}D embeddings")
+        return len(entity_names)
+
     def clear_graph(self):
-        """清空图谱。"""
+        """清空图谱和实体索引。"""
         self.graph_builder.clear_graph()
+        self._entity_index = None
+        self._entity_metadata = []
+
+    def save(self, storage_path: str):
+        """保存索引到磁盘。
+
+        Args:
+            storage_path: 存储目录路径。
+        """
+        import os
+        import pickle
+
+        os.makedirs(storage_path, exist_ok=True)
+
+        # 保存图谱
+        graph_path = os.path.join(storage_path, "graph.pkl")
+        self.graph_builder._save_graph()
+        # 复制文件到 storage_path
+        import shutil
+        shutil.copy(self.graph_builder.storage_path, graph_path)
+
+        # 保存实体索引
+        if self._entity_index is not None:
+            entity_index_path = os.path.join(storage_path, "entity_index.pkl")
+            with open(entity_index_path, "wb") as f:
+                pickle.dump({
+                    "index": self._entity_index,
+                    "metadata": self._entity_metadata
+                }, f)
+
+        print(f"Saved index to {storage_path}")
+
+    def load(self, storage_path: str):
+        """从磁盘加载索引。
+
+        Args:
+            storage_path: 存储目录路径。
+        """
+        import os
+        import pickle
+
+        # 加载图谱
+        graph_path = os.path.join(storage_path, "graph.pkl")
+        if os.path.exists(graph_path):
+            with open(graph_path, "rb") as f:
+                self.graph_builder._graph = pickle.load(f)
+
+        # 加载实体索引
+        entity_index_path = os.path.join(storage_path, "entity_index.pkl")
+        if os.path.exists(entity_index_path):
+            with open(entity_index_path, "rb") as f:
+                data = pickle.load(f)
+                self._entity_index = data["index"]
+                self._entity_metadata = data["metadata"]
+
+        print(f"Loaded index from {storage_path}")
 
 
 def get_graphrag_indexer(
@@ -96,19 +201,19 @@ if __name__ == "__main__":
     print(f"  Alias groups: {result['alias_groups']}")
     print("  ✓ Passed")
 
-    # 测试 4: 查看实体 chunk_ids
-    print("\n[Test 4] Check entity chunk_ids...")
-    for entity in list(indexer.graph_builder._graph.nodes())[:5]:
-        node_data = indexer.graph_builder._graph.nodes[entity]
-        chunk_ids = node_data.get("chunk_ids", [])
-        node_type = node_data.get("node_type", "N/A")
-        print(f"  - {entity} ({node_type}): chunk_ids={chunk_ids}")
+    # 测试 4: 实体向量索引
+    print("\n[Test 4] Index entities...")
+    indexed_count = indexer.index_entities()
+    print(f"  Indexed {indexed_count} entities")
     print("  ✓ Passed")
 
-    # 测试 5: 向量索引测试
-    print("\n[Test 5] Build vectorstore...")
-    vectorstore = indexer.build_vectorstore(chunks)
-    print(f"  Vectorstore built with {vectorstore.index.ntotal} documents")
+    # 测试 5: 保存和加载
+    print("\n[Test 5] Save and load index...")
+    indexer.save("/tmp/test_graphrag_index")
+    new_indexer = get_graphrag_indexer()
+    new_indexer.load("/tmp/test_graphrag_index")
+    print(f"  Loaded graph: {new_indexer.graph_builder.stats()}")
+    print(f"  Loaded entity index: {new_indexer._entity_index.ntotal if new_indexer._entity_index else 0} entities")
     print("  ✓ Passed")
 
     print("\n" + "=" * 60)

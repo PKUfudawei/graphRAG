@@ -15,7 +15,7 @@ if _project_root not in sys.path:
 from models.embedding import get_embedding
 
 
-class EntityResolver:
+class Resolver:
     """Resolve entity aliases using embeddings and FAISS.
 
     Args:
@@ -97,7 +97,7 @@ class EntityResolver:
         return alias_map
 
 
-def get_resolver(embed_model=None, threshold: float = 0.9) -> EntityResolver:
+def get_resolver(embed_model=None, threshold: float = 0.9) -> Resolver:
     """Get an entity resolver instance.
 
     Args:
@@ -105,11 +105,11 @@ def get_resolver(embed_model=None, threshold: float = 0.9) -> EntityResolver:
         embed_model: Optional EmbeddingWrapper instance. If None, uses default.
 
     Returns:
-        EntityResolver instance.
+        Resolver instance.
     """
     embed_model = embed_model or get_embedding()
 
-    return EntityResolver(embed_model=embed_model, threshold=threshold)
+    return Resolver(embed_model=embed_model, threshold=threshold)
 
 
 if __name__ == "__main__":

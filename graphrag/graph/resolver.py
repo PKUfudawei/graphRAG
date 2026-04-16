@@ -1,4 +1,4 @@
-"""Entity deduplication using FAISS."""
+"""Entity resolution using FAISS."""
 import os
 import sys
 from collections import Counter
@@ -15,8 +15,8 @@ if _project_root not in sys.path:
 from models.embedding import get_embedding
 
 
-class EntityDeduplicator:
-    """Deduplicate entities using embeddings and FAISS.
+class EntityResolver:
+    """Resolve entity aliases using embeddings and FAISS.
 
     Args:
         embed_model: Embedding model with encode method (EmbeddingWrapper).
@@ -97,25 +97,25 @@ class EntityDeduplicator:
         return alias_map
 
 
-def get_entity_deduplicator(embed_model=None, threshold: float = 0.9) -> EntityDeduplicator:
-    """Get an entity deduplicator instance.
+def get_resolver(embed_model=None, threshold: float = 0.9) -> EntityResolver:
+    """Get an entity resolver instance.
 
     Args:
         threshold: Similarity threshold. Default is 0.9.
         embed_model: Optional EmbeddingWrapper instance. If None, uses default.
 
     Returns:
-        EntityDeduplicator instance.
+        EntityResolver instance.
     """
     embed_model = embed_model or get_embedding()
 
-    return EntityDeduplicator(embed_model=embed_model, threshold=threshold)
+    return EntityResolver(embed_model=embed_model, threshold=threshold)
 
 
 if __name__ == "__main__":
-    deduplicator = get_entity_deduplicator(threshold=0.85)
+    resolver = get_resolver(threshold=0.85)
 
     names = ["北京", "北京市", "中国首都", "上海"]
-    alias_map = deduplicator.find_aliases(names)
+    alias_map = resolver.find_aliases(names)
     print(f"Input: {names}")
     print(f"Alias map: {alias_map}")

@@ -20,7 +20,7 @@ from models.graph import ExtractionResult
 from models.llm import get_llm
 
 
-class EntityExtractor:
+class Extractor:
     """Extract entities and relations from text using json_schema structured output.
 
     Uses LangChain's with_structured_output with json_schema method
@@ -30,6 +30,39 @@ class EntityExtractor:
         llm: LangChain language model instance.
         max_workers: Maximum number of concurrent workers for parallel extraction.
     """
+
+    @staticmethod
+    def sanitize_rel_type(rel_type: str) -> str:
+        """Sanitize relationship type for Cypher - remove/replace all special chars.
+
+        This ensures relationship types are safe for use in Cypher queries.
+        Called at extraction time to normalize relationship types from the source.
+
+        Args:
+            rel_type: Original relationship type from LLM extraction.
+
+        Returns:
+            Sanitized relationship type safe for use in Cypher.
+        """
+        safe_rel_type = rel_type.upper()
+        safe_rel_type = safe_rel_type.replace(" ", "_")
+        safe_rel_type = safe_rel_type.replace("-", "_")
+        safe_rel_type = safe_rel_type.replace("'", "_")
+        safe_rel_type = safe_rel_type.replace('"', "_")
+        safe_rel_type = safe_rel_type.replace(".", "_")
+        safe_rel_type = safe_rel_type.replace("/", "_")
+        safe_rel_type = safe_rel_type.replace("\\", "_")
+        safe_rel_type = safe_rel_type.replace("(", "_")
+        safe_rel_type = safe_rel_type.replace(")", "_")
+        safe_rel_type = safe_rel_type.replace("?", "_")
+        safe_rel_type = safe_rel_type.replace("!", "_")
+        safe_rel_type = safe_rel_type.replace(",", "_")
+        safe_rel_type = safe_rel_type.replace(";", "_")
+        safe_rel_type = safe_rel_type.replace(":", "_")
+        # Ensure it starts with a letter
+        if safe_rel_type and not safe_rel_type[0].isalpha():
+            safe_rel_type = "R_" + safe_rel_type
+        return safe_rel_type
 
     def __init__(self, llm: Optional[BaseLanguageModel] = None, max_workers: int = 16):
         # Suppress Pydantic serialization warnings from LangChain internals
@@ -115,7 +148,7 @@ All source and target in relationships must exist in entities."""),
             Relationship(
                 source=node_map[edge.source],
                 target=node_map[edge.target],
-                type=edge.relation
+                type=self.sanitize_rel_type(edge.relation)
             )
             for edge in result.get_edges()
         ]
@@ -177,10 +210,10 @@ All source and target in relationships must exist in entities."""),
         return results
 
 
-def get_entity_extractor(
+def get_extractor(
     llm: Optional[BaseLanguageModel] = None,
     max_workers: int = 16
-) -> EntityExtractor:
+) -> Extractor:
     """Get an entity extractor instance.
 
     Args:
@@ -191,11 +224,11 @@ def get_entity_extractor(
         EntityExtractor instance.
     """
     llm = llm or get_llm()
-    return EntityExtractor(llm=llm, max_workers=max_workers)
+    return Extractor(llm=llm, max_workers=max_workers)
 
 
 if __name__ == "__main__":
-    extractor = get_entity_extractor()
+    extractor = get_extractor()
 
     text = "Ebenezer Scrooge is a wealthy but miserly businessman in Victorian London. " \
            "He is visited by the ghost of his former partner Jacob Marley on Christmas Eve."

@@ -22,6 +22,7 @@ dependencies = [
     "torchaudio>=2.0.0",
     "python-louvain>=0.16",
     "neo4j>=5.0.0",
+    "jupyter>=1.1.1",
 ]
 
 [dependency-groups]

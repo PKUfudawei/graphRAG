@@ -16,8 +16,8 @@ sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if sys_path not in sys.path:
     sys.path.insert(0, sys_path)
 
-from models.chunker import get_chunker as _get_chunker
-from models.embedding import get_embedding as _get_embedder
+from models.chunker import get_chunker
+from models.embedding import get_embedding
 
 
 class Indexer:
@@ -26,20 +26,14 @@ class Indexer:
     def __init__(
         self,
         chunker: Optional[TokenTextSplitter] = None,
-        embeddings: Optional[Embeddings] = None,
-        chunk_model: str = "cl100k_base",
-        chunk_size: int = 512,
-        overlap: int = 50,
-        truncations: Optional[List[str]] = None,
-        embed_model: str = "BAAI/bge-m3",
-        embed_device: str = "cuda:0",
+        embedding: Optional[Embeddings] = None,
     ):
         """
         初始化索引器
 
         Args:
             chunker: 预创建的 chunker 实例
-            embeddings: 预创建的 Embeddings 实例
+            embedding: 预创建的 Embeddings 实例
             chunk_size: 每个 chunk 的 token 数量
             overlap: 相邻 chunk 之间的重叠 token 数量
             truncations: 在哪些关键词处截断文档
@@ -47,16 +41,8 @@ class Indexer:
             embed_device: 嵌入模型设备
             chunk_model: tiktoken encoding 名称
         """
-        self.chunker = chunker or _get_chunker(
-            model=chunk_model,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            truncations=truncations,
-        )
-        self.embeddings = embeddings or _get_embedder(
-            model=embed_model,
-            device=embed_device,
-        )
+        self.chunker = chunker or get_chunker()
+        self.embedding = embedding or get_embedding()
 
     def index_documents(self, documents: List[Document]) -> List[Document]:
         """
@@ -76,7 +62,7 @@ class Indexer:
                 metadatas=[doc.metadata]
             )
             for chunk in chunks:
-                chunk.metadata["chunk_id"] = f"chunk_{global_chunk_id}"
+                chunk.metadata["chunk_id"] = global_chunk_id
                 global_chunk_id += 1
             all_chunks.extend(chunks)
         return all_chunks
@@ -91,7 +77,7 @@ class Indexer:
         Returns:
             FAISS 向量存储实例
         """
-        embeddings = self.embeddings.embed_model if hasattr(self.embeddings, 'embed_model') else self.embeddings
+        embeddings = self.embedding.embed_model if hasattr(self.embedding, 'embed_model') else self.embedding
         return FAISS.from_documents(documents, embeddings)
 
     def save_vectorstore(self, vectorstore: FAISS, path: str):
@@ -102,22 +88,17 @@ class Indexer:
 
     def load_vectorstore(self, path: str) -> FAISS:
         """加载向量存储"""
-        embeddings = self.embeddings.embed_model if hasattr(self.embeddings, 'embed_model') else self.embeddings
+        embed_model = self.embedding.embed_model if hasattr(self.embedding, 'embed_model') else self.embedding
         return FAISS.load_local(
             path,
-            embeddings,
+            embed_model,
             allow_dangerous_deserialization=True
         )
 
 
 def get_indexer(
     chunker: Optional[TokenTextSplitter] = None,
-    chunk_model: str = "cl100k_base",
-    chunk_size: int = 512,
-    overlap: int = 50,
-    truncations: Optional[List[str]] = None,
-    embed_model: str = "BAAI/bge-m3",
-    embed_device: str = "cuda:0",
+    embedding = None,
 ) -> Indexer:
     """
     获取索引器实例
@@ -134,14 +115,11 @@ def get_indexer(
     Returns:
         Indexer 实例
     """
+    chunker = chunker or get_chunker()
+    embedding = embedding or get_embedding()
     return Indexer(
         chunker=chunker,
-        chunk_model=chunk_model,
-        chunk_size=chunk_size,
-        overlap=overlap,
-        truncations=truncations,
-        embed_model=embed_model,
-        embed_device=embed_device,
+        embedding=embedding,
     )
 
 
@@ -162,34 +140,38 @@ if __name__ == "__main__":
     # 测试 1: 默认 truncations=['acknowledgement', 'acknowledgment']
     print("=" * 60)
     print("Test 1:")
-    indexer1 = get_indexer(chunk_size=100, overlap=20)
+    chunker = get_chunker(chunk_size=100, overlap=20, truncations=['acknowledgement', 'acknowledgment'])
+    indexer1 = get_indexer(chunker=chunker)
     result1 = indexer1.index_documents(documents)
     for i, doc in enumerate(result1):
-        print(f"  Chunk {i}: {doc.page_content.strip()}")
+        print(f"- Chunk {i}: {doc.page_content.strip()}")
 
     # 测试 2: truncations=[] (禁用)
     print()
     print("=" * 60)
     print("Test 2:")
-    indexer2 = get_indexer(chunk_size=100, overlap=20, truncations=[])
+    chunker = get_chunker(chunk_size=100, overlap=20, truncations=None)
+    indexer2 = get_indexer(chunker=chunker)
     result2 = indexer2.index_documents(documents)
     for i, doc in enumerate(result2):
-        print(f"  Chunk {i}: {doc.page_content.strip()}")
+        print(f"- Chunk {i}: {doc.page_content.strip()}")
 
     # 测试 3: 自定义 truncations=['topic']
     print()
     print("=" * 60)
     print("Test 3:")
-    indexer3 = get_indexer(chunk_size=200, overlap=20, truncations=['topic'])
+    chunker = get_chunker(chunk_size=100, overlap=20, truncations=['topic'])
+    indexer3 = get_indexer(chunker=chunker)
     result3 = indexer3.index_documents(documents)
     for i, doc in enumerate(result3):
-        print(f"  Chunk {i}: {doc.page_content.strip()}")
+        print(f"- Chunk {i}: {doc.page_content.strip()}")
 
     # 测试 4: 自定义 truncations=['acknowledgement']
     print()
     print("=" * 60)
     print("Test 4:")
-    indexer4 = get_indexer(chunk_size=200, overlap=20, truncations=['acknowledgement'])
+    chunker = get_chunker(chunk_size=100, overlap=20, truncations=['acknowledgment'])
+    indexer4 = get_indexer(chunker=chunker)
     result4 = indexer4.index_documents(documents)
     for i, doc in enumerate(result4):
         print(f"- Chunk {i}: {doc.page_content.strip()}")

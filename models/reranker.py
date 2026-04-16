@@ -17,9 +17,7 @@ class SimpleReranker:
         scores = self.model.predict(texts)
         scored_docs = list(zip(documents, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
-
-        if self.top_k is not None:
-            scored_docs = scored_docs[:self.top_k]
+        scored_docs = scored_docs[:self.top_k] if self.top_k else scored_docs
 
         return [doc for doc, _ in scored_docs]
 
@@ -29,14 +27,12 @@ class SimpleReranker:
         scores = self.model.predict(texts)
         scored_docs = list(zip(documents, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
-        
-        if self.top_k is not None:
-            scored_docs = scored_docs[:self.top_k]
+        scored_docs = scored_docs[:self.top_k] if self.top_k else scored_docs
 
         return scored_docs
     
 
-def get_reranker(model="BAAI/bge-reranker-v2-m3", device='cuda:0', top_k=3):
+def get_reranker(model="BAAI/bge-reranker-v2-m3", device='cuda:0', top_k=None):
     return SimpleReranker(
         model=model,
         device=device,

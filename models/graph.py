@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional, Union
 
 class Node(BaseModel):
@@ -16,6 +16,11 @@ class Edge(BaseModel):
 
 class ExtractionResult(BaseModel):
     """Result of entity and relation extraction."""
+    model_config = ConfigDict(
+        validate_assignment=False,
+        extra="ignore",
+        use_enum_values=True,
+    )
     entities: List[Union[Node, str]] = Field(
         ...,
         description="Extracted entities (can be strings or {name, type} objects)"

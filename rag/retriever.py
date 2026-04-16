@@ -14,7 +14,7 @@ from typing import List, Optional, Any
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever as LangchainBM25Retriever
-from models.reranker import get_reranker as _get_reranker
+from models.reranker import get_reranker
 
 
 class Retriever:
@@ -24,7 +24,7 @@ class Retriever:
         self,
         vectorstore: FAISS,
         reranker: Optional[Any] = None,
-        top_k: int = 5,
+        top_k: int = 10,
         bm25_retriever: Optional[LangchainBM25Retriever] = None,
     ):
         """
@@ -167,7 +167,7 @@ def get_retriever(
         Retriever 实例
     """
 
-    reranker = _get_reranker(
+    reranker = get_reranker(
         model=reranker_model,
         device=reranker_device,
         top_k=rerank_top_k if rerank_top_k else top_k,

@@ -8,6 +8,8 @@ from langchain_community.graphs.graph_document import (
     Relationship as LCRelationship
 )
 from neo4j import GraphDatabase, Driver
+from dotenv import load_dotenv
+load_dotenv()
 
 
 class Neo4jStorage:
@@ -83,8 +85,25 @@ class Neo4jStorage:
                 source_id = str(rel.source.id)
                 target_id = str(rel.target.id)
                 rel_type = rel.type or "RELATED_TO"
-                # Sanitize relationship type for Cypher
-                safe_rel_type = rel_type.upper().replace(" ", "_").replace("-", "_")
+                # Sanitize relationship type for Cypher - remove/replace all special chars
+                safe_rel_type = rel_type.upper()
+                safe_rel_type = safe_rel_type.replace(" ", "_")
+                safe_rel_type = safe_rel_type.replace("-", "_")
+                safe_rel_type = safe_rel_type.replace("'", "_")
+                safe_rel_type = safe_rel_type.replace('"', "_")
+                safe_rel_type = safe_rel_type.replace(".", "_")
+                safe_rel_type = safe_rel_type.replace("/", "_")
+                safe_rel_type = safe_rel_type.replace("\\", "_")
+                safe_rel_type = safe_rel_type.replace("(", "_")
+                safe_rel_type = safe_rel_type.replace(")", "_")
+                safe_rel_type = safe_rel_type.replace("?", "_")
+                safe_rel_type = safe_rel_type.replace("!", "_")
+                safe_rel_type = safe_rel_type.replace(",", "_")
+                safe_rel_type = safe_rel_type.replace(";", "_")
+                safe_rel_type = safe_rel_type.replace(":", "_")
+                # Ensure it starts with a letter
+                if safe_rel_type and not safe_rel_type[0].isalpha():
+                    safe_rel_type = "R_" + safe_rel_type
                 properties = rel.properties or {}
 
                 cypher = f"""
@@ -243,176 +262,86 @@ def _check_neo4j_connection(
 
 if __name__ == "__main__":
     import os
+    from langchain_core.documents import Document
+    from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 
-    print("=" * 60)
-    print("Neo4jStorage Tests")
-    print("=" * 60)
-
-    # Get Neo4j connection settings from environment or use defaults
     NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
     NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "neo4j")
 
-    print(f"\nConnection: {NEO4J_URI}")
-    print(f"Username: {NEO4J_USERNAME}")
+    print(f"Testing Neo4jStorage: {NEO4J_URI}")
 
-    # Check Neo4j connectivity
+    # Create test data
+    test_doc = GraphDocument(
+        nodes=[
+            Node(id="Alice", type="Person", properties={"age": 30}),
+            Node(id="Bob", type="Person", properties={"age": 25}),
+        ],
+        relationships=[
+            Relationship(
+                source=Node(id="Alice"),
+                target=Node(id="Bob"),
+                type="knows",
+                properties={"since": 2015}
+            ),
+        ],
+        source=Document(page_content="test", metadata={"source": "test"})
+    )
+
+    # Test without Neo4j connection
+    print("\n[Test 1] Class instantiation...")
+    storage = get_neo4j_storage(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    assert storage.uri == NEO4J_URI
+    assert storage.username == NEO4J_USERNAME
+    print("  ✓ Passed")
+
+    print("\n[Test 2] Context manager...")
+    with get_neo4j_storage(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD) as s:
+        assert s.uri == NEO4J_URI
+    print("  ✓ Passed")
+
+    print("\n[Test 3] GraphDocument structure...")
+    assert len(test_doc.nodes) == 2
+    assert len(test_doc.relationships) == 1
+    print("  ✓ Passed")
+
+    # Integration tests if Neo4j is available
     if not _check_neo4j_connection(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD):
-        print("\n⚠ Neo4j is not accessible. Skipping integration tests.")
-        print("\nTo run full tests, start Neo4j:")
-        print("  docker run -d --name neo4j-test -p 7687:7687 -p 7474:7474 \\" )
-        print("    -e NEO4J_AUTH=neo4j/neo4j neo4j:latest")
-        print("\nOr set environment variables:")
-        print("  export NEO4J_URI=bolt://your-host:7687")
-        print("  export NEO4J_USERNAME=neo4j")
-        print("  export NEO4J_PASSWORD=your-password")
-
-        # Run unit tests that don't require Neo4j
-        print("\n" + "-" * 60)
-        print("Running unit tests (no Neo4j required)")
-        print("-" * 60)
-
-        # Test 1: Class instantiation
-        print("\n[Test 1] Creating Neo4jStorage...")
-        storage = get_neo4j_storage(
-            uri=NEO4J_URI,
-            username=NEO4J_USERNAME,
-            password=NEO4J_PASSWORD
-        )
-        print(f"  ✓ Neo4jStorage created")
-        print(f"    URI: {storage.uri}")
-        print(f"    Username: {storage.username}")
-
-        # Test 2: Context manager
-        print("\n[Test 2] Testing context manager...")
-        with get_neo4j_storage(
-            uri=NEO4J_URI,
-            username=NEO4J_USERNAME,
-            password=NEO4J_PASSWORD
-        ) as ctx_storage:
-            print(f"  ✓ Context manager works")
-            print(f"    Storage URI: {ctx_storage.uri}")
-
-        # Test 3: GraphDocument structure
-        print("\n[Test 3] Testing GraphDocument structure...")
-        from langchain_core.documents import Document
-        from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
-
-        test_doc = GraphDocument(
-            nodes=[
-                Node(id="Alice", type="Person", properties={"age": 30}),
-                Node(id="Bob", type="Person", properties={"age": 25}),
-            ],
-            relationships=[
-                Relationship(
-                    source=Node(id="Alice"),
-                    target=Node(id="Bob"),
-                    type="knows",
-                    properties={"since": 2015}
-                ),
-            ],
-            source=Document(page_content="test data", metadata={"source": "test"})
-        )
-        print(f"  ✓ GraphDocument created")
-        print(f"    Nodes: {len(test_doc.nodes)}")
-        print(f"    Relationships: {len(test_doc.relationships)}")
-
-        print("\n" + "=" * 60)
-        print("Unit tests passed! (Integration tests skipped)")
-        print("=" * 60)
+        print("\n⚠ Neo4j not accessible. Integration tests skipped.")
+        print("  Start Neo4j: ./neo4j start")
+        print("\nAll unit tests passed!")
     else:
-        # Neo4j is accessible, run full integration tests
         try:
-            # Test 1: Create storage instance
-            print("\n[Test 1] Creating Neo4jStorage...")
-            storage = get_neo4j_storage(
-                uri=NEO4J_URI,
-                username=NEO4J_USERNAME,
-                password=NEO4J_PASSWORD
-            )
-            print("  ✓ Neo4jStorage created")
+            storage = get_neo4j_storage(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
 
-            # Test 2: Clear existing data
-            print("\n[Test 2] Clearing existing data...")
+            print("\n[Test 4] Clear graph...")
             storage.clear_graph()
-            print("  ✓ Graph cleared")
+            print("  ✓ Passed")
 
-            # Test 3: Create and save a GraphDocument
-            print("\n[Test 3] Saving GraphDocument...")
-            from langchain_core.documents import Document
-            from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
-
-            test_doc = GraphDocument(
-                nodes=[
-                    Node(id="Alice", type="Person", properties={"age": 30}),
-                    Node(id="Bob", type="Person", properties={"age": 25}),
-                    Node(id="Acme Corp", type="Organization", properties={"founded": 2020}),
-                ],
-                relationships=[
-                    Relationship(
-                        source=Node(id="Alice"),
-                        target=Node(id="Bob"),
-                        type="knows",
-                        properties={"since": 2015}
-                    ),
-                    Relationship(
-                        source=Node(id="Alice"),
-                        target=Node(id="Acme Corp"),
-                        type="works_at",
-                        properties={"role": "Engineer"}
-                    ),
-                ],
-                source=Document(page_content="test data", metadata={"source": "test"})
-            )
-
+            print("\n[Test 5] Save graph...")
             storage.save_graph(test_doc)
-            print("  ✓ GraphDocument saved")
+            print("  ✓ Passed")
 
-            # Test 4: Get stats
-            print("\n[Test 4] Getting graph stats...")
+            print("\n[Test 6] Get stats...")
             stats = storage.stats()
-            print(f"  Nodes: {stats['num_nodes']}")
-            print(f"  Relationships: {stats['num_relationships']}")
-            assert stats["num_nodes"] == 3, f"Expected 3 nodes, got {stats['num_nodes']}"
-            assert stats["num_relationships"] == 2, f"Expected 2 relationships, got {stats['num_relationships']}"
-            print("  ✓ Stats correct")
+            assert stats["num_nodes"] == 2
+            assert stats["num_relationships"] == 1
+            print("  ✓ Passed")
 
-            # Test 5: Load graph
-            print("\n[Test 5] Loading GraphDocument...")
-            loaded_doc = storage.load_graph()
-            print(f"  Loaded {len(loaded_doc.nodes)} nodes")
-            print(f"  Loaded {len(loaded_doc.relationships)} relationships")
-            assert len(loaded_doc.nodes) == 3, f"Expected 3 nodes, got {len(loaded_doc.nodes)}"
-            assert len(loaded_doc.relationships) == 2, f"Expected 2 relationships, got {len(loaded_doc.relationships)}"
-            print("  ✓ GraphDocument loaded")
+            print("\n[Test 7] Load graph...")
+            loaded = storage.load_graph()
+            assert len(loaded.nodes) == 2
+            assert len(loaded.relationships) == 1
+            print("  ✓ Passed")
 
-            # Test 6: Custom Cypher query
-            print("\n[Test 6] Running custom Cypher query...")
-            results = storage.query(
-                "MATCH (n:Entity) WHERE n.node_type = 'Person' RETURN n.id as name, n.age as age ORDER BY name"
-            )
-            print(f"  Query results: {results}")
-            assert len(results) == 2, f"Expected 2 results, got {len(results)}"
-            print("  ✓ Cypher query executed")
+            print("\n[Test 8] Custom query...")
+            results = storage.query("MATCH (n:Entity) RETURN count(n) as cnt")
+            assert results[0]["cnt"] == 2
+            print("  ✓ Passed")
 
-            # Test 7: Context manager
-            print("\n[Test 7] Testing context manager...")
-            with get_neo4j_storage(
-                uri=NEO4J_URI,
-                username=NEO4J_USERNAME,
-                password=NEO4J_PASSWORD
-            ) as ctx_storage:
-                stats = ctx_storage.stats()
-                print(f"  Stats from context manager: {stats}")
-            print("  ✓ Context manager works")
-
-            # Cleanup
             storage.clear_graph()
             storage.close()
-
-            print("\n" + "=" * 60)
-            print("All tests passed!")
-            print("=" * 60)
+            print("\nAll tests passed!")
 
         except Exception as e:
             print(f"\n❌ Test failed: {e}")

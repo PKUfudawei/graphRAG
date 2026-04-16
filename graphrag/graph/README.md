@@ -21,17 +21,6 @@ export JAVA_HOME=/data/fudawei/miniconda3/lib/jvm
 
 # Stop Neo4j
 /data/fudawei/neo4j-community-2026.03.1/bin/neo4j stop
-```
-
-### Using Docker
-
-```bash
-docker run -d --name neo4j \
-  -p 7687:7687 \
-  -p 7474:7474 \
-  -e NEO4J_AUTH=neo4j/Neo4j2024! \
-  neo4j:latest
-```
 
 ### First-time Setup
 
@@ -54,6 +43,8 @@ export JAVA_HOME=/data/fudawei/miniconda3/lib/jvm
 
 ### Access Neo4j Browser
 
+Connect from my laptop: `ssh -L 7474:localhost:7474 -L 7687:localhost:7687 lhcb`
+open in my browser:
 - URL: http://localhost:7474
 - Username: `neo4j`
 - Password: `Neo4j2024!`

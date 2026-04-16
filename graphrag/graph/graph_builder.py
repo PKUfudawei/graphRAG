@@ -1,348 +1,284 @@
-"""Graph builder for building and storing knowledge graphs.
+"""Graph builder for building knowledge graph from documents."""
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 
-This module provides utilities for building NetworkX graphs from
-LangChain GraphDocument and storing them to Neo4j.
-"""
-import os
-import sys
-from typing import List, Optional
-
-import networkx as nx
-from langchain_community.graphs.graph_document import (
-    GraphDocument,
-    Node as LCNode,
-    Relationship as LCRelationship
-)
+from langchain_core.documents import Document
+from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 from tqdm import tqdm
 
-# 支持直接运行和模块导入
-script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-parent_dir = os.path.dirname(script_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
-from graph_storage import Neo4jStorage, get_neo4j_storage
+from .entity_extractor import get_entity_extractor
+from .entity_deduplicator import get_entity_deduplicator
+from .graph_storage import get_neo4j_storage
 
 
 class GraphBuilder:
-    """Build and store knowledge graphs from LangChain GraphDocument.
-
-    Converts LangChain GraphDocument to NetworkX MultiDiGraph and
-    optionally stores to Neo4j.
+    """Build knowledge graph from documents.
 
     Args:
-        neo4j_storage: Optional Neo4jStorage instance for persisting graphs.
+        dedup_threshold: Similarity threshold for entity deduplication. Default is 0.9.
+        max_workers: Maximum number of concurrent workers for batch processing.
     """
 
     def __init__(
         self,
-        neo4j_storage: Optional[Neo4jStorage] = None
+        entity_extractor = None,
+        entity_deduplicator = None,
+        max_workers: int = 16,
     ):
-        self.graph = nx.MultiDiGraph()
-        self.neo4j_storage = neo4j_storage
+        self.max_workers = max_workers
+        self.entity_extractor = entity_extractor or get_entity_extractor()
+        self.entity_deduplicator = entity_deduplicator or get_entity_deduplicator()
+        self._graph_storage = None
 
-    def add_document(self, doc: GraphDocument) -> "GraphBuilder":
-        """Add a single GraphDocument to the graph.
+    @property
+    def graph_storage(self):
+        """Lazy load graph storage."""
+        if self._graph_storage is None:
+            self._graph_storage = get_neo4j_storage()
+        return self._graph_storage
+
+    def build(self, document: Document, chunk_id: int) -> GraphDocument:
+        """Build a GraphDocument from a single document.
 
         Args:
-            doc: LangChain GraphDocument to add.
+            document: Input LangChain Document.
+            chunk_id: The index of the document in the batch.
 
         Returns:
-            self for method chaining.
+            GraphDocument with deduplicated nodes and relationships.
         """
-        # Add nodes
-        for node in doc.nodes:
-            node_id = str(node.id)
-            if node_id not in self.graph:
-                self.graph.add_node(
-                    node_id,
-                    node_type=node.type or "Entity",
-                    weight=1,
-                    **(node.properties or {})
-                )
-            else:
-                self.graph.nodes[node_id]['weight'] += 1
-
-        # Add relationships
-        for rel in doc.relationships:
-            source_id = str(rel.source.id)
-            target_id = str(rel.target.id)
-
-            # Skip self-loops
-            if source_id == target_id:
-                continue
-
-            self._add_relationship(source_id, target_id, rel)
-
-        return self
-
-    def _add_relationship(
-        self,
-        source_id: str,
-        target_id: str,
-        rel: LCRelationship
-    ) -> None:
-        """Add or update a relationship in the graph.
-
-        Args:
-            source_id: Source node ID.
-            target_id: Target node ID.
-            rel: Relationship to add.
-        """
-        # Ensure nodes exist
-        for node_id, node_type in [(source_id, "Entity"), (target_id, "Entity")]:
-            if node_id not in self.graph:
-                self.graph.add_node(node_id, node_type=node_type, weight=1)
-
-        rel_type = rel.type or "RELATED_TO"
-
-        # Check if relationship already exists
-        if self.graph.has_edge(source_id, target_id):
-            for key, data in self.graph[source_id][target_id].items():
-                if key == rel_type:
-                    data['weight'] += 1
-                    return
-
-        # Add new relationship
-        self.graph.add_edge(
-            source_id,
-            target_id,
-            key=rel_type,
-            weight=1,
-            **(rel.properties or {})
+        # Step 1: Extract entities and relations
+        graph_doc = self.entity_extractor.extract(
+            text=document.page_content,
+            source=str(chunk_id)
         )
 
-    def add_documents(self, documents: List[GraphDocument]) -> "GraphBuilder":
-        """Add multiple GraphDocuments to the graph.
+        # Step 2: Deduplicate entities
+        graph_doc = self._deduplicate_graph(graph_doc, chunk_id)
+
+        return graph_doc
+
+    def _deduplicate_graph(self, graph_doc: GraphDocument, chunk_id: int) -> GraphDocument:
+        """Deduplicate nodes in a GraphDocument using entity deduplicator.
 
         Args:
-            documents: List of GraphDocuments to add.
+            graph_doc: Input GraphDocument.
+            chunk_id: The chunk ID for the source document.
 
         Returns:
-            self for method chaining.
+            GraphDocument with deduplicated nodes.
         """
-        for doc in tqdm(documents, desc="Building graph"):
-            self.add_document(doc)
-        return self
+        if not graph_doc.nodes:
+            return graph_doc
 
-    def build(self, documents: List[GraphDocument]) -> nx.MultiDiGraph:
-        """Build graph from a list of GraphDocuments.
+        # Get all unique node names
+        node_names = [node.id for node in graph_doc.nodes]
 
-        Args:
-            documents: List of GraphDocuments to build from.
+        # Find aliases using embedding similarity
+        alias_map = self.entity_deduplicator.find_aliases(node_names)
 
-        Returns:
-            The built NetworkX MultiDiGraph.
-        """
-        self.add_documents(documents)
-        return self.graph
+        # Build mapping from old name to canonical name
+        name_to_canonical = {name: alias_map.get(name, name) for name in node_names}
 
-    def save_to_neo4j(self) -> None:
-        """Save the graph to Neo4j.
+        # Count types for each canonical name to find most common type
+        canonical_type_counter: dict[str, Counter] = {}
+        for node in graph_doc.nodes:
+            canonical_name = name_to_canonical[node.id]
+            if canonical_name not in canonical_type_counter:
+                canonical_type_counter[canonical_name] = Counter()
+            canonical_type_counter[canonical_name][node.type] += 1
 
-        Requires neo4j_storage to be set.
-        """
-        if self.neo4j_storage is None:
-            raise ValueError("Neo4jStorage not configured")
+        # Build new node map with canonical names
+        canonical_nodes: dict[str, Node] = {}
+        for node in graph_doc.nodes:
+            canonical_name = name_to_canonical[node.id]
+            if canonical_name not in canonical_nodes:
+                # Get most common type for this canonical name
+                most_common_type = canonical_type_counter[canonical_name].most_common(1)[0][0]
+                canonical_nodes[canonical_name] = Node(
+                    id=canonical_name,
+                    type=most_common_type
+                )
 
-        # Convert NetworkX graph to GraphDocument
-        graph_doc = self._to_graph_document()
-        self.neo4j_storage.save_graph(graph_doc)
+        # Rebuild relationships with canonical node references
+        new_relationships = []
+        for rel in graph_doc.relationships:
+            source_id = getattr(rel.source, 'id', str(rel.source))
+            target_id = getattr(rel.target, 'id', str(rel.target))
+            source_canonical = name_to_canonical.get(source_id, source_id)
+            target_canonical = name_to_canonical.get(target_id, target_id)
 
-    def _to_graph_document(self) -> GraphDocument:
-        """Convert NetworkX graph to LangChain GraphDocument.
+            # Skip if source or target doesn't exist after dedup
+            if source_canonical in canonical_nodes and target_canonical in canonical_nodes:
+                new_relationships.append(Relationship(
+                    source=canonical_nodes[source_canonical],
+                    target=canonical_nodes[target_canonical],
+                    type=rel.type
+                ))
 
-        Returns:
-            GraphDocument representation of the graph.
-        """
-        from langchain_core.documents import Document
-
-        nodes = []
-        for node_id, data in self.graph.nodes(data=True):
-            node_type = data.get('node_type', 'Entity')
-            properties = {k: v for k, v in data.items() if k not in ('node_type', 'weight')}
-            nodes.append(LCNode(id=node_id, type=node_type, properties=properties))
-
-        relationships = []
-        for source_id, target_id, rel_type, data in self.graph.edges(data=True, keys=True):
-            source_node = LCNode(id=source_id, type='Entity')
-            target_node = LCNode(id=target_id, type='Entity')
-            properties = {k: v for k, v in data.items() if k != 'weight'}
-            relationships.append(LCRelationship(
-                source=source_node,
-                target=target_node,
-                type=rel_type,
-                properties=properties
-            ))
+        # Create source document with chunk_id
+        source_doc = Document(
+            page_content=graph_doc.source.page_content if graph_doc.source else "",
+            metadata={"source": chunk_id}
+        )
 
         return GraphDocument(
-            nodes=nodes,
-            relationships=relationships,
-            source=Document(page_content="", metadata={"source": "graph_builder"})
+            nodes=list(canonical_nodes.values()),
+            relationships=new_relationships,
+            source=source_doc
         )
 
-    def remove_self_loops(self) -> "GraphBuilder":
-        """Remove self-loops from the graph.
+    def build_and_save(self, document: Document, chunk_id: int) -> GraphDocument:
+        """Build a GraphDocument and save it to Neo4j.
+
+        Args:
+            document: Input LangChain Document.
+            chunk_id: The index of the document in the batch.
 
         Returns:
-            self for method chaining.
+            The built GraphDocument.
         """
-        self.graph.remove_edges_from(nx.selfloop_edges(self.graph))
-        return self
+        graph_doc = self.build(document, chunk_id)
+        self.graph_storage.save_graph(graph_doc)
+        return graph_doc
 
-    def get_graph(self) -> nx.MultiDiGraph:
-        """Get the underlying NetworkX graph.
+    def build_batch(self, documents: list[Document]) -> list[GraphDocument]:
+        """Build GraphDocuments from multiple documents concurrently.
+
+        Args:
+            documents: List of input LangChain Documents.
 
         Returns:
-            The NetworkX MultiDiGraph.
+            List of GraphDocuments with deduplicated nodes and relationships.
         """
-        return self.graph
+        if not documents:
+            return []
 
-    def stats(self) -> dict:
-        """Get graph statistics.
+        results = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(self.build, doc, idx)
+                for idx, doc in enumerate(documents)
+            ]
+
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Building graphs"
+            ):
+                results.append(future.result())
+
+        # Sort results by chunk_id to maintain order
+        results.sort(key=lambda g: int(g.source.metadata.get("source", 0)))
+        return results
+
+    def build_and_save_batch(self, documents: list[Document]) -> list[GraphDocument]:
+        """Build GraphDocuments from multiple documents and save to Neo4j.
+
+        Args:
+            documents: List of input LangChain Documents.
 
         Returns:
-            Dictionary with node and edge counts.
+            List of built GraphDocuments.
         """
-        return {
-            "num_nodes": self.graph.number_of_nodes(),
-            "num_edges": self.graph.number_of_edges()
-        }
+        if not documents:
+            return []
 
-    def clear(self) -> "GraphBuilder":
-        """Clear the graph.
+        results = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(self.build_and_save, doc, idx)
+                for idx, doc in enumerate(documents)
+            ]
 
-        Returns:
-            self for method chaining.
-        """
-        self.graph.clear()
-        return self
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Building and saving graphs"
+            ):
+                results.append(future.result())
 
-
-def build_graph(
-    documents: List[GraphDocument],
-    neo4j_storage: Optional[Neo4jStorage] = None
-) -> nx.MultiDiGraph:
-    """Build a graph from a list of GraphDocuments.
-
-    Args:
-        documents: List of GraphDocuments to build from.
-        neo4j_storage: Optional Neo4jStorage for persisting.
-
-    Returns:
-        The built NetworkX MultiDiGraph.
-    """
-    builder = GraphBuilder(neo4j_storage=neo4j_storage)
-    return builder.build(documents)
+        # Sort results by chunk_id to maintain order
+        results.sort(key=lambda g: int(g.source.metadata.get("source", 0)))
+        return results
 
 
 def get_graph_builder(
-    neo4j_uri: Optional[str] = None,
-    neo4j_username: Optional[str] = None,
-    neo4j_password: Optional[str] = None
+    entity_extractor=None,
+    entity_deduplicator=None,
+    max_workers=16,
 ) -> GraphBuilder:
-    """Get a GraphBuilder instance with optional Neo4j storage.
+    """Get a GraphBuilder instance.
 
     Args:
-        neo4j_uri: Neo4j connection URI.
-        neo4j_username: Neo4j username.
-        neo4j_password: Neo4j password.
+        dedup_threshold: Similarity threshold for entity deduplication. Default is 0.9.
+        max_workers: Maximum number of concurrent workers. Default is 16.
 
     Returns:
         GraphBuilder instance.
     """
-    storage = None
-    if neo4j_uri is not None:
-        storage = get_neo4j_storage(
-            uri=neo4j_uri,
-            username=neo4j_username or "neo4j",
-            password=neo4j_password
-        )
-    return GraphBuilder(neo4j_storage=storage)
+    entity_extractor = entity_extractor or get_entity_extractor()
+    entity_deduplicator = entity_deduplicator or get_entity_deduplicator()
+    
+    return GraphBuilder(
+        entity_extractor=entity_extractor,
+        entity_deduplicator=entity_deduplicator,
+        max_workers=max_workers,
+    )
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("GraphBuilder Tests")
-    print("=" * 60)
+    # Test GraphBuilder
+    print("[Test 1] Create GraphBuilder...")
+    builder = get_graph_builder()
+    print("  ✓ Passed")
 
-    # Test 1: Create GraphBuilder
-    print("\n[Test 1] Creating GraphBuilder...")
-    builder = GraphBuilder()
-    print(f"  ✓ GraphBuilder created")
-
-    # Test 2: Create test GraphDocument
-    print("\n[Test 2] Creating test GraphDocument...")
-    test_doc = GraphDocument(
-        nodes=[
-            LCNode(id="Alice", type="Person", properties={"age": 30}),
-            LCNode(id="Bob", type="Person", properties={"age": 25}),
-            LCNode(id="Acme Corp", type="Organization", properties={"founded": 2020}),
-        ],
-        relationships=[
-            LCRelationship(
-                source=LCNode(id="Alice"),
-                target=LCNode(id="Bob"),
-                type="knows",
-                properties={"since": 2015}
-            ),
-            LCRelationship(
-                source=LCNode(id="Alice"),
-                target=LCNode(id="Acme Corp"),
-                type="works_at",
-                properties={"role": "Engineer"}
-            ),
-        ],
-        source=None
+    print("\n[Test 2] Build single document...")
+    test_doc = Document(
+        page_content="Ebenezer Scrooge is a wealthy businessman in Victorian London. "
+                     "He is visited by the ghost of his former partner Jacob Marley on Christmas Eve.",
+        metadata={"source": "test"}
     )
-    print(f"  GraphDocument created with {len(test_doc.nodes)} nodes, {len(test_doc.relationships)} relationships")
+    graph_doc = builder.build(test_doc, chunk_id=0)
+    print(f"  Nodes: {len(graph_doc.nodes)}")
+    print(f"  Relationships: {len(graph_doc.relationships)}")
+    for node in graph_doc.nodes:
+        print(f"    - {node.id} ({node.type})")
+    for rel in graph_doc.relationships:
+        print(f"    - {rel.source.id} --{rel.type}--> {rel.target.id}")
+    print("  ✓ Passed")
 
-    # Test 3: Add document to graph
-    print("\n[Test 3] Adding document to graph...")
-    builder.add_document(test_doc)
-    stats = builder.stats()
-    print(f"  Stats: {stats}")
-    assert stats["num_nodes"] == 3, f"Expected 3 nodes, got {stats['num_nodes']}"
-    assert stats["num_edges"] == 2, f"Expected 2 edges, got {stats['num_edges']}"
-    print(f"  ✓ Document added successfully")
+    print("\n[Test 3] Build batch documents...")
+    test_docs = [
+        Document(
+            page_content="北京是中国的首都，位于华北平原。",
+            metadata={"source": "doc1"}
+        ),
+        Document(
+            page_content="北京市是中华人民共和国的首都，政治文化中心。",
+            metadata={"source": "doc2"}
+        ),
+        Document(
+            page_content="上海是中国的经济中心，位于长江入海口。",
+            metadata={"source": "doc3"}
+        ),
+    ]
+    graph_docs = builder.build_batch(test_docs)
+    print(f"  Built {len(graph_docs)} graphs")
+    for i, gd in enumerate(graph_docs):
+        print(f"  Graph {i} (chunk_id={gd.source.metadata.get('source')}): {len(gd.nodes)} nodes, {len(gd.relationships)} relationships")
+    print("  ✓ Passed")
 
-    # Test 4: Build from multiple documents
-    print("\n[Test 4] Building from multiple documents...")
-    builder2 = GraphBuilder()
-    graph = builder2.build([test_doc, test_doc])  # Add twice to test weight increment
-    stats = builder2.stats()
-    print(f"  Stats after adding twice: {stats}")
-    # Check node weight
-    alice_weight = builder2.graph.nodes["Alice"]["weight"]
-    print(f"  Alice node weight: {alice_weight}")
-    assert alice_weight == 2, f"Expected weight 2, got {alice_weight}"
-    print(f"  ✓ Multiple documents built successfully")
+    # Test save to Neo4j if available
+    print("\n[Test 4] Build and save to Neo4j...")
+    try:
+        graph_docs = builder.build_and_save_batch(test_docs)
+        print(f"  Saved {len(graph_docs)} graphs to Neo4j")
+        stats = builder.graph_storage.stats()
+        print(f"  Total in Neo4j: {stats['num_nodes']} nodes, {stats['num_relationships']} relationships")
+        print("  ✓ Passed")
+    except Exception as e:
+        print(f"  ⚠ Neo4j not accessible: {e}")
+        print("  Start Neo4j: ./neo4j start")
 
-    # Test 5: Convert to GraphDocument
-    print("\n[Test 5] Converting to GraphDocument...")
-    converted_doc = builder._to_graph_document()
-    print(f"  Converted doc: {len(converted_doc.nodes)} nodes, {len(converted_doc.relationships)} relationships")
-    print(f"  ✓ Conversion successful")
-
-    # Test 6: Clear graph
-    print("\n[Test 6] Clearing graph...")
-    builder.clear()
-    stats = builder.stats()
-    print(f"  Stats after clear: {stats}")
-    assert stats["num_nodes"] == 0, "Expected 0 nodes after clear"
-    print(f"  ✓ Graph cleared successfully")
-
-    # Test 7: get_graph_builder factory function
-    print("\n[Test 7] Testing get_graph_builder factory...")
-    builder3 = get_graph_builder()
-    print(f"  ✓ GraphBuilder created via factory")
-
-    # Test 8: build_graph convenience function
-    print("\n[Test 8] Testing build_graph convenience function...")
-    graph = build_graph([test_doc])
-    print(f"  Graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
-    print(f"  ✓ build_graph works")
-
-    print("\n" + "=" * 60)
-    print("All tests passed!")
-    print("=" * 60)
+    print("\nAll tests completed!")

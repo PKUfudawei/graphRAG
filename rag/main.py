@@ -12,11 +12,8 @@ from tqdm import tqdm
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from indexer import get_indexer
-from models.reranker import get_reranker
+from rag.indexer import get_indexer, get_chunker, get_embedding
+from rag.retriever import get_retriever
 from models.llm import get_llm
 
 
@@ -25,7 +22,7 @@ def parse_arguments():
     parser.add_argument("-b", "--build", type=str, help="构建索引：指定文件路径或 glob 模式")
     parser.add_argument("-q", "--query", type=str, help="单次查询")
     parser.add_argument("-i", "--interact", action="store_true", help="交互模式")
-    parser.add_argument("-v", "--vectorstore", type=str, default="../data/vectorstore",
+    parser.add_argument("-v", "--vectorstore", type=str, default="./data/vectorstore",
                         help="向量存储路径")
     parser.add_argument("--chunk_size", type=int, default=512)
     parser.add_argument("--overlap", type=int, default=50)
@@ -37,26 +34,8 @@ def parse_arguments():
     return args, parser
 
 
-def get_retriever(vectorstore, top_k=5, reranker_device="cuda:0"):
-    """创建检索器"""
-    retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
-    reranker = get_reranker(device=reranker_device, top_k=top_k)
-
-    def retrieve(query: str):
-        docs = retriever.invoke(query)
-        if docs:
-            docs = reranker.rerank(query, docs)
-        return docs
-
-    retrieve.retrieve = retrieve
-    return retrieve
-
-
-def build_index(files: List[str], vectorbase_path: str, embed_device: str = "cuda:0",
-                chunk_size: int = 512, overlap: int = 50) -> None:
+def build_index(files: List[str], indexer, vectorbase_path: str) -> None:
     """构建向量索引（支持纯文本文件）"""
-    indexer = get_indexer(chunk_size=chunk_size, overlap=overlap, embed_device=embed_device)
-
     # 读取文件并创建 Document 对象
     documents = []
     for file_path in tqdm(files, desc="Loading files"):
@@ -80,7 +59,7 @@ def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
         llm = get_llm()
 
     context_text = "\n\n".join(
-        f"[Doc {i+1}]: {doc.page_content}" for i, doc in enumerate(context_docs)
+        f"[Chunk {doc.metadata.get('chunk_id', 'unknown')}]: {doc.page_content}" for doc in context_docs
     )
     prompt = f"""根据以下参考信息回答问题。如果信息不足，请说明不知道。
 
@@ -93,10 +72,10 @@ def generate_answer(query: str, context_docs: List[Document], llm=None) -> str:
     return llm.invoke([HumanMessage(content=prompt)]).content
 
 
-def rag_query(query: str, retriever, llm=None, max_context_docs: int = 3) -> dict:
+def rag_query(query: str, retriever, llm=None, max_context_docs=None) -> dict:
     """RAG 查询"""
     docs = retriever.retrieve(query)
-    context_docs = docs[:max_context_docs]
+    context_docs = docs[:max_context_docs] if max_context_docs else docs
     answer = generate_answer(query, context_docs, llm)
 
     return {
@@ -115,6 +94,10 @@ def main():
     if not any([args.build, args.query, args.interact]):
         parser.print_help()
         return
+    
+    chunker = get_chunker(chunk_size=args.chunk_size, overlap=args.overlap, truncations=None)
+    embedding = get_embedding(device=args.embed_device)
+    indexer = get_indexer(chunker, embedding)
 
     # 构建模式
     if args.build:
@@ -122,7 +105,7 @@ def main():
         if not files:
             print(f"Error: No files matched '{args.build}'")
             return
-        build_index(files, args.vectorstore, args.embed_device, args.chunk_size, args.overlap)
+        build_index(files, indexer, args.vectorstore)
         return
 
     # 查询/交互模式
@@ -130,9 +113,16 @@ def main():
         print(f"Error: Vectorstore not found at {args.vectorstore}")
         return
 
-    indexer = get_indexer(embed_device=args.embed_device)
     vectorstore = indexer.load_vectorstore(args.vectorstore)
-    retriever = get_retriever(vectorstore, top_k=args.top_k, reranker_device=args.rerank_device)
+    n_chunks = len(vectorstore.docstore._dict.items())
+    print(f"Loaded {n_chunks} chunks")
+    retriever = get_retriever(
+        vectorstore = vectorstore,
+        top_k = 5,
+        reranker_model = "BAAI/bge-reranker-v2-m3",
+        reranker_device = args.rerank_device,
+        rerank_top_k = None,
+    )
     llm = get_llm(streaming=True)
 
     # 单次查询

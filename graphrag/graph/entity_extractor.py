@@ -1,6 +1,7 @@
 """Entity and relation extractor using LangChain with json_schema structured output."""
 import os
 import sys
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
@@ -31,6 +32,13 @@ class EntityExtractor:
     """
 
     def __init__(self, llm: Optional[BaseLanguageModel] = None, max_workers: int = 16):
+        # Suppress Pydantic serialization warnings from LangChain internals
+        warnings.filterwarnings(
+            "ignore",
+            message="Pydantic serializer warnings",
+            category=UserWarning,
+            module="pydantic"
+        )
         self.llm = llm or get_llm()
         self.max_workers = max_workers
         self._setup_prompt()
@@ -62,7 +70,8 @@ All source and target in relationships must exist in entities."""),
             structured_llm = self.llm.with_structured_output(
                 ExtractionResult,
                 method="json_schema",
-                include_raw=False
+                include_raw=False,
+                strict=True,
             )
             chain = self.prompt | structured_llm
             result: ExtractionResult = chain.invoke({"text": text})
@@ -181,6 +190,7 @@ def get_entity_extractor(
     Returns:
         EntityExtractor instance.
     """
+    llm = llm or get_llm()
     return EntityExtractor(llm=llm, max_workers=max_workers)
 
 

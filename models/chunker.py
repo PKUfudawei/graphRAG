@@ -128,9 +128,6 @@ def get_chunker(
     Returns:
         Chunker 实例
     """
-    # 处理 truncations 参数：None 表示使用默认值，空列表表示禁用
-    print(f"Chunker truncations for each document: {truncations}")
-
     return Chunker(
         model=model,
         chunk_size=chunk_size,

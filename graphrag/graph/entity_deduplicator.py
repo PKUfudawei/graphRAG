@@ -97,7 +97,7 @@ class EntityDeduplicator:
         return alias_map
 
 
-def get_entity_deduplicator(threshold: float = 0.9, embed_model=None) -> EntityDeduplicator:
+def get_entity_deduplicator(embed_model=None, threshold: float = 0.9) -> EntityDeduplicator:
     """Get an entity deduplicator instance.
 
     Args:

@@ -1,39 +1,21 @@
 """
 GraphRAG Indexer - 整合向量索引和知识图谱索引
 """
-import os
-import sys
 from typing import List, Optional
-from tqdm import tqdm
-import faiss
-import numpy as np
 
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument
-from langchain_text_splitters import TokenTextSplitter
 
-# 支持直接运行和模块导入
-script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-parent_dir = os.path.dirname(script_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
-# 导入依赖
 from graphrag.graph.builder import get_graph_builder
-from models.embedding import get_embedding
-from models.chunker import get_chunker
 from rag.indexer import Indexer
 
 
 class GraphRAGIndexer(Indexer):
     """GraphRAG 索引器 - 同时索引向量数据库和知识图谱
 
-    Args:
-        chunk_size: 每个 chunk 的 token 数量
-        overlap: 相邻 chunk 之间的重叠 token 数量
-        dedup_threshold: 实体去重阈值
-        embedding_model_name: 嵌入模型名称
-        vector_dim: 向量维度
+    工作流程:
+    1. index_documents(): 分块文档（继承自 Indexer）
+    2. build_graph_from_chunks(): 从 chunks 提取实体 -> 对齐 -> 建图
     """
 
     def __init__(
@@ -50,24 +32,20 @@ class GraphRAGIndexer(Indexer):
             self._graph_builder = get_graph_builder()
         return self._graph_builder
 
-    def build_graph(self, chunk: Document) -> GraphDocument:
-        """为单个 chunk 构建图谱"""
-        return self.graph_builder.build(chunk, chunk.metadata.get("chunk_id", 0))
+    def build_graph_from_chunks(self, chunks: List[Document]) -> dict:
+        """从 chunks 构建知识图谱（提取 -> 对齐 -> 建图）。
 
-    def build_graph_batch(self, chunks: List[Document]) -> List[GraphDocument]:
-        """为多个 chunk 构建图谱"""
-        return self.graph_builder.build_batch(chunks)
+        Args:
+            chunks: 分块后的 Document 列表。
 
-    def extract_and_save_batch(self, chunks: List[Document]) -> List[GraphDocument]:
-        """提取图谱并保存到 NetworkX（不去重）"""
-        return self.graph_builder.extract_and_save_batch(chunks)
+        Returns:
+            统计信息字典。
+        """
+        return self.graph_builder.build_from_documents(chunks)
 
-    def align_entities(self) -> dict:
-        """实体对齐"""
-        return self.graph_builder.align_entities()
-    
-
-
+    def clear_graph(self):
+        """清空图谱。"""
+        self.graph_builder.clear_graph()
 
 
 def get_graphrag_indexer(
@@ -110,21 +88,21 @@ if __name__ == "__main__":
     print(f"  Generated {len(chunks)} chunks")
     print("  ✓ Passed")
 
-    # 测试 3: 图谱提取测试（增量维护方案）
-    print("\n[Test 3] Extract graphs (no dedup)...")
-    indexer.graph_builder.clear_graph()
-    graph_docs = indexer.extract_and_save_batch(chunks)
-    print(f"  Extracted {len(graph_docs)} graph documents")
-    stats = indexer.graph_builder.stats()
-    print(f"  Graph stats: {stats['num_nodes']} nodes, {stats['num_relationships']} relationships")
+    # 测试 3: 图谱构建测试（提取 -> 对齐 -> 建图）
+    print("\n[Test 3] Build graph from chunks...")
+    indexer.clear_graph()
+    result = indexer.build_graph_from_chunks(chunks)
+    print(f"  Graph built: {result['entities']} entities, {result['relationships']} relationships")
+    print(f"  Alias groups: {result['alias_groups']}")
     print("  ✓ Passed")
 
-    # 测试 4: 实体对齐测试
-    print("\n[Test 4] Align entities...")
-    align_result = indexer.align_entities()
-    print(f"  Aligned: {align_result['groups_processed']} groups, {align_result['entities_merged']} entities merged")
-    stats_after = indexer.graph_builder.stats()
-    print(f"  Graph stats after align: {stats_after['num_nodes']} nodes, {stats_after['num_relationships']} relationships")
+    # 测试 4: 查看实体 chunk_ids
+    print("\n[Test 4] Check entity chunk_ids...")
+    for entity in list(indexer.graph_builder._graph.nodes())[:5]:
+        node_data = indexer.graph_builder._graph.nodes[entity]
+        chunk_ids = node_data.get("chunk_ids", [])
+        node_type = node_data.get("node_type", "N/A")
+        print(f"  - {entity} ({node_type}): chunk_ids={chunk_ids}")
     print("  ✓ Passed")
 
     # 测试 5: 向量索引测试

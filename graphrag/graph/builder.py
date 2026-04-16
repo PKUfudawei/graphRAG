@@ -1,6 +1,15 @@
-"""Graph builder for building knowledge graph from documents using NetworkX."""
+"""Graph builder for building knowledge graph from documents using NetworkX.
+
+工作流程:
+1. extract_batch(): 并行提取所有 chunks 的实体和关系（不建图）
+2. align_and_build(): 消歧对齐后构建 NetworkX 图
+
+实体属性:
+- chunk_ids: 集合，记录实体来自哪些 chunk
+- node_type: 实体类型（最常用）
+"""
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 import pickle
 import networkx as nx
@@ -16,10 +25,6 @@ from .resolver import get_resolver
 
 class GraphBuilder:
     """Build knowledge graph from documents using NetworkX.
-
-    工作流程:
-    1. extract_and_save_batch(): 并行提取实体并直接添加到 NetworkX 图（不去重）
-    2. align_entities(): 用 embedding 找 alias，按度数对齐合并
 
     Args:
         entity_extractor: 实体提取器。
@@ -66,147 +71,22 @@ class GraphBuilder:
         if self.storage_path.exists():
             self.storage_path.unlink()
 
-    def build(self, document: Document, chunk_id: int) -> GraphDocument:
-        """Build a GraphDocument from a single document.
+    # ==================== 提取阶段 ====================
+
+    def extract_batch(self, documents: list[Document]) -> list[GraphDocument]:
+        """并行提取所有 chunks 的实体和关系（不建图，不去重）。
 
         Args:
-            document: Input LangChain Document.
-            chunk_id: The index of the document in the batch.
+            documents: 输入的 LangChain Document 列表（chunks）。
 
         Returns:
-            GraphDocument with deduplicated nodes and relationships.
-        """
-        # Step 1: Extract entities and relations
-        graph_doc = self.entity_extractor.extract(
-            text=document.page_content,
-            source=str(chunk_id)
-        )
-
-        # Step 2: Deduplicate entities
-        graph_doc = self._deduplicate_graph(graph_doc, chunk_id)
-
-        return graph_doc
-
-    def build_batch(self, documents: list[Document]) -> list[GraphDocument]:
-        """Build GraphDocuments from multiple documents concurrently.
-
-        Args:
-            documents: List of input LangChain Documents.
-
-        Returns:
-            List of GraphDocuments with deduplicated nodes and relationships.
+            提取的 GraphDocument 列表（未去重，未建图）。
         """
         if not documents:
             return []
 
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(self.build, doc, doc.metadata.get("chunk_id", idx))
-                for idx, doc in enumerate(documents)
-            ]
-
-            for future in tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Building graphs"
-            ):
-                results.append(future.result())
-
-        # Sort results by chunk_id to maintain order
-        results.sort(key=lambda g: int(g.source.metadata.get("source", 0)))
-        return results
-
-    def _deduplicate_graph(self, graph_doc: GraphDocument, chunk_id: int) -> GraphDocument:
-        """Deduplicate nodes in a GraphDocument using entity resolver.
-
-        Args:
-            graph_doc: Input GraphDocument.
-            chunk_id: The chunk ID for the source document.
-
-        Returns:
-            GraphDocument with deduplicated nodes.
-        """
-        if not graph_doc.nodes:
-            return graph_doc
-
-        # Get all unique node names
-        node_names = [node.id for node in graph_doc.nodes]
-
-        # Find aliases using embedding similarity
-        alias_map = self.entity_resolver.find_aliases(node_names)
-
-        # Build mapping from old name to canonical name
-        name_to_canonical = {name: alias_map.get(name, name) for name in node_names}
-
-        # Count types for each canonical name to find most common type
-        canonical_type_counter: dict[str, Counter] = {}
-        for node in graph_doc.nodes:
-            canonical_name = name_to_canonical[node.id]
-            if canonical_name not in canonical_type_counter:
-                canonical_type_counter[canonical_name] = Counter()
-            canonical_type_counter[canonical_name][node.type] += 1
-
-        # Build new node map with canonical names
-        canonical_nodes: dict[str, Node] = {}
-        for node in graph_doc.nodes:
-            canonical_name = name_to_canonical[node.id]
-            if canonical_name not in canonical_nodes:
-                # Get most common type for this canonical name
-                most_common_type = canonical_type_counter[canonical_name].most_common(1)[0][0]
-                canonical_nodes[canonical_name] = Node(
-                    id=canonical_name,
-                    type=most_common_type
-                )
-
-        # Rebuild relationships with canonical node references
-        new_relationships = []
-        for rel in graph_doc.relationships:
-            source_id = getattr(rel.source, 'id', str(rel.source))
-            target_id = getattr(rel.target, 'id', str(rel.target))
-            source_canonical = name_to_canonical.get(source_id, source_id)
-            target_canonical = name_to_canonical.get(target_id, target_id)
-
-            # Skip if source or target doesn't exist after dedup
-            if source_canonical in canonical_nodes and target_canonical in canonical_nodes:
-                new_relationships.append(Relationship(
-                    source=canonical_nodes[source_canonical],
-                    target=canonical_nodes[target_canonical],
-                    type=rel.type
-                ))
-
-        # Create source document with chunk_id
-        source_doc = Document(
-            page_content=graph_doc.source.page_content if graph_doc.source else "",
-            metadata={"source": chunk_id}
-        )
-
-        return GraphDocument(
-            nodes=list(canonical_nodes.values()),
-            relationships=new_relationships,
-            source=source_doc
-        )
-
-    # ==================== 增量维护方案 ====================
-
-    def extract_and_save_batch(self, documents: list[Document]) -> list[GraphDocument]:
-        """提取实体并添加到 NetworkX 图（不去重）。
-
-        这是增量维护方案的第一步：并行提取所有文档的实体和关系，
-        直接添加到 NetworkX 图，不做去重处理。去重在后续的 align_entities() 中完成。
-
-        Args:
-            documents: 输入的 LangChain Document 列表。
-
-        Returns:
-            提取的 GraphDocument 列表（未去重）。
-        """
-        if not documents:
-            return []
-
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # 并行提取实体
             futures = [
                 executor.submit(
                     self.entity_extractor.extract,
@@ -225,195 +105,140 @@ class GraphBuilder:
 
         # 按 chunk_id 排序
         results.sort(key=lambda g: int(g.source.metadata.get("source", 0)) if g.source else 0)
-
-        # 批量添加到 NetworkX 图
-        with tqdm(total=len(results), desc="Adding to NetworkX") as pbar:
-            for graph_doc in results:
-                # 添加节点
-                for node in graph_doc.nodes:
-                    self.graph.add_node(
-                        node.id,
-                        node_type=node.type,
-                        **node.properties or {}
-                    )
-
-                # 添加关系
-                for rel in graph_doc.relationships:
-                    source_id = rel.source.id
-                    target_id = rel.target.id
-
-                    # 只添加已存在的节点之间的关系
-                    if source_id in self.graph and target_id in self.graph:
-                        self.graph.add_edge(
-                            source_id,
-                            target_id,
-                            rel_type=rel.type,
-                            **rel.properties or {}
-                        )
-
-                pbar.update()
-
-        # 持久化到磁盘
-        self._save_graph()
-
         return results
 
-    def align_entities(self, batch_size: int = 100) -> dict[str, int]:
-        """从 NetworkX 图读取所有实体，用 embedding 找 alias，然后对齐合并。
+    # ==================== 对齐和建图阶段 ====================
 
-        这是增量维护方案的第二步：
-        1. 从 NetworkX 读取所有实体名称及其度数
-        2. 用 resolver.find_aliases() 找 alias 组
-        3. 对每个 alias 组，选择度数最高的作为 canonical
-        4. 转移所有关系到 canonical，清理重复关系，删除旧实体
+    def align_and_build(self, graph_docs: list[GraphDocument]) -> dict[str, int]:
+        """对提取的 GraphDocuments 进行消歧对齐，然后构建 NetworkX 图。
+
+        流程:
+        1. 收集所有实体，记录 chunk_ids
+        2. 用 embedding 找 alias，进行消歧
+        3. 构建实体映射 {original_name: canonical_name}
+        4. 用 canonical 名称构建 NetworkX 图，保留 chunk_ids 集合
 
         Args:
-            batch_size: 每批处理的 alias 组数量。
+            graph_docs: extract_batch() 返回的 GraphDocument 列表。
 
         Returns:
-            统计信息字典，包含处理的组数、合并的实体数、转移的关系数等。
+            统计信息字典。
         """
-        # Step 1: 从 NetworkX 读取所有实体及其度数
-        print("\n[Align Step 1] Loading entities from NetworkX...")
-        entities_with_degree = [
-            {"entity_id": node, "degree": degree}
-            for node, degree in self.graph.degree()
-        ]
+        # Step 1: 收集所有实体和关系，记录 chunk_ids
+        print("\n[Align Step 1] Collecting entities and relationships...")
 
-        if not entities_with_degree:
-            print("No entities found in NetworkX.")
-            return {"groups_processed": 0, "entities_merged": 0, "relationships_transferred": 0}
+        # entity_name -> {chunk_ids: set, types: Counter}
+        entity_info: dict[str, dict] = defaultdict(lambda: {"chunk_ids": set(), "types": Counter()})
+        # 收集所有关系 (source, target, rel_type, chunk_id)
+        all_relationships = []
 
-        entity_names = [e["entity_id"] for e in entities_with_degree]
-        # 构建 entity_id -> degree 映射
-        degree_map = {e["entity_id"]: e["degree"] for e in entities_with_degree}
+        for graph_doc in graph_docs:
+            chunk_id = int(graph_doc.source.metadata.get("source", 0))
 
-        print(f"Found {len(entity_names)} entities in NetworkX.")
+            for node in graph_doc.nodes:
+                entity_info[node.id]["chunk_ids"].add(chunk_id)
+                entity_info[node.id]["types"][node.type] += 1
+
+            for rel in graph_doc.relationships:
+                source_id = rel.source.id
+                target_id = rel.target.id
+                all_relationships.append({
+                    "source": source_id,
+                    "target": target_id,
+                    "rel_type": rel.type,
+                    "chunk_id": chunk_id
+                })
+
+        entity_names = list(entity_info.keys())
+        print(f"  Found {len(entity_names)} unique entities from {len(graph_docs)} chunks")
+
+        if not entity_names:
+            print("No entities found.")
+            return {"entities": 0, "relationships": 0, "alias_groups": 0}
 
         # Step 2: 用 embedding 找 alias
         print("\n[Align Step 2] Finding aliases using embedding similarity...")
         alias_map = self.entity_resolver.find_aliases(entity_names)
 
-        # Step 3: 构建 alias 组 {canonical: [aliases]}
-        alias_groups: dict[str, list[str]] = {}
-        for entity, canonical in alias_map.items():
-            if canonical not in alias_groups:
-                alias_groups[canonical] = []
-            if entity not in alias_groups[canonical]:
-                alias_groups[canonical].append(entity)
+        # 构建 canonical 映射
+        name_to_canonical = {name: alias_map.get(name, name) for name in entity_names}
 
-        # 过滤掉只有单个实体的组
+        # 统计 alias 组
+        alias_groups = defaultdict(list)
+        for name, canonical in name_to_canonical.items():
+            alias_groups[canonical].append(name)
         alias_groups = {k: v for k, v in alias_groups.items() if len(v) > 1}
 
-        print(f"Found {len(alias_groups)} alias groups to align.")
+        print(f"  Found {len(alias_groups)} alias groups")
 
-        if not alias_groups:
-            return {"groups_processed": 0, "entities_merged": 0, "relationships_transferred": 0}
+        # Step 3: 构建 NetworkX 图（使用 canonical 名称）
+        print("\n[Align Step 3] Building NetworkX graph...")
+        new_graph = nx.DiGraph()
 
-        # Step 4: 对每个 alias 组执行对齐
-        print("\n[Align Step 3] Aligning entities...")
-        total_merged = 0
-        total_rels_transferred = 0
-        groups_processed = 0
+        # 添加节点（使用 canonical 名称，合并 chunk_ids）
+        canonical_info: dict[str, dict] = defaultdict(lambda: {"chunk_ids": set(), "types": Counter()})
+        for name, canonical in name_to_canonical.items():
+            canonical_info[canonical]["chunk_ids"].update(entity_info[name]["chunk_ids"])
+            canonical_info[canonical]["types"].update(entity_info[name]["types"])
 
-        # 分批处理
-        group_list = list(alias_groups.items())
-        for i in range(0, len(group_list), batch_size):
-            batch = group_list[i:i + batch_size]
+        for canonical, info in canonical_info.items():
+            most_common_type = info["types"].most_common(1)[0][0]
+            new_graph.add_node(
+                canonical,
+                node_type=most_common_type,
+                chunk_ids=sorted(info["chunk_ids"])  # 转换为列表以便 pickle
+            )
 
-            for canonical, aliases in batch:
-                # 选择度数最高的作为保留实体
-                all_entities = [canonical] + [a for a in aliases if a != canonical]
-                target = max(all_entities, key=lambda x: (degree_map.get(x, 0), x))
-                to_delete = [e for e in all_entities if e != target]
+        # 添加关系（使用 canonical 名称，去重）
+        seen_edges = set()
+        for rel in all_relationships:
+            source_canonical = name_to_canonical.get(rel["source"], rel["source"])
+            target_canonical = name_to_canonical.get(rel["target"], rel["target"])
 
-                if not to_delete:
-                    continue
-
-                # 执行合并：转移关系 + 删除旧实体
-                merged, rels_transferred = self._merge_entity_group(target, to_delete)
-                total_merged += merged
-                total_rels_transferred += rels_transferred
-                groups_processed += 1
-
-                if groups_processed % 10 == 0:
-                    print(f"  Processed {groups_processed} groups, merged {total_merged} entities...")
-
-        # 持久化到磁盘
-        self._save_graph()
-
-        print(f"\n[Align Complete] Processed {groups_processed} groups, "
-              f"merged {total_merged} entities, "
-              f"transferred {total_rels_transferred} relationships.")
-
-        return {
-            "groups_processed": groups_processed,
-            "entities_merged": total_merged,
-            "relationships_transferred": total_rels_transferred
-        }
-
-    def _merge_entity_group(self, target: str, to_delete: list[str]) -> tuple[int, int]:
-        """合并一个 alias 组：将 to_delete 中的所有实体合并到 target。
-
-        Args:
-            target: 保留的实体 ID（度数最高）。
-            to_delete: 要删除的实体 ID 列表。
-
-        Returns:
-            (删除的实体数，转移的关系数)。
-        """
-        rels_transferred = 0
-        deleted_count = 0
-
-        for old_id in to_delete:
-            if old_id not in self.graph:
+            if source_canonical not in new_graph or target_canonical not in new_graph:
                 continue
 
-            # 转移出边
-            out_neighbors = list(self.graph.successors(old_id))
-            for other_id in out_neighbors:
-                if other_id == target:
-                    continue
+            edge_key = (source_canonical, target_canonical, rel["rel_type"])
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
 
-                # 获取原边的属性
-                old_edge_data = self.graph[old_id][other_id]
-                rel_type = old_edge_data.get("rel_type", "RELATED_TO")
+            new_graph.add_edge(
+                source_canonical,
+                target_canonical,
+                rel_type=rel["rel_type"]
+            )
 
-                # 检查是否已存在相同的关系
-                if target in self.graph and other_id in self.graph[target]:
-                    existing_edge_data = self.graph[target][other_id]
-                    if existing_edge_data.get("rel_type") == rel_type:
-                        continue  # 已存在，跳过
+        # 赋值并持久化到磁盘
+        self._graph = new_graph
+        self._save_graph()
 
-                # 添加新边
-                self.graph.add_edge(target, other_id, rel_type=rel_type)
-                rels_transferred += 1
+        stats = self.stats()
+        print(f"\n[Build Complete] Graph built: {stats['num_nodes']} nodes, {stats['num_relationships']} relationships")
 
-            # 转移入边
-            in_neighbors = list(self.graph.predecessors(old_id))
-            for other_id in in_neighbors:
-                if other_id == target:
-                    continue
+        return {
+            "entities": stats["num_nodes"],
+            "relationships": stats["num_relationships"],
+            "alias_groups": len(alias_groups)
+        }
 
-                # 获取原边的属性
-                old_edge_data = self.graph[other_id][old_id]
-                rel_type = old_edge_data.get("rel_type", "RELATED_TO")
+    # ==================== 便捷方法：一站式提取 + 对齐 + 建图 ====================
 
-                # 检查是否已存在相同的关系
-                if other_id in self.graph and target in self.graph[other_id]:
-                    existing_edge_data = self.graph[other_id][target]
-                    if existing_edge_data.get("rel_type") == rel_type:
-                        continue  # 已存在，跳过
+    def build_from_documents(self, documents: list[Document]) -> dict[str, int]:
+        """一站式从 documents 构建知识图谱。
 
-                # 添加新边
-                self.graph.add_edge(other_id, target, rel_type=rel_type)
-                rels_transferred += 1
+        流程：extract_batch() -> align_and_build()
 
-            # 删除旧实体
-            self.graph.remove_node(old_id)
-            deleted_count += 1
+        Args:
+            documents: 输入的 LangChain Document 列表（chunks）。
 
-        return deleted_count, rels_transferred
+        Returns:
+            统计信息字典。
+        """
+        graph_docs = self.extract_batch(documents)
+        return self.align_and_build(graph_docs)
+
+    # ==================== 查询方法 ====================
 
     def stats(self) -> dict[str, int]:
         """Get graph statistics.
@@ -466,6 +291,19 @@ class GraphBuilder:
 
         return neighbors
 
+    def get_entity_chunk_ids(self, entity_id: str) -> list[int]:
+        """Get chunk IDs where an entity appears.
+
+        Args:
+            entity_id: Entity ID.
+
+        Returns:
+            List of chunk IDs.
+        """
+        if entity_id not in self.graph:
+            return []
+        return self.graph[entity_id].get("chunk_ids", [])
+
 
 def get_graph_builder(
     entity_extractor=None,
@@ -496,7 +334,7 @@ if __name__ == "__main__":
     from langchain_core.documents import Document
 
     print("=" * 60)
-    print("GraphBuilder NetworkX 增量维护方案测试")
+    print("GraphBuilder 新流程测试：提取 -> 对齐 -> 建图")
     print("=" * 60)
 
     # 创建测试文档
@@ -523,69 +361,42 @@ if __name__ == "__main__":
         # Step 1: 创建 Builder
         print("\n[Step 1] 创建 GraphBuilder...")
         builder = get_graph_builder(storage_path="test_graph.pkl")
-        builder.clear_graph()  # 清空之前的测试数据
+        builder.clear_graph()
         print("  ✓ GraphBuilder 创建成功")
 
-        # Step 2: 提取 GraphDocuments 并添加到 NetworkX（不去重）
-        print("\n[Step 2] 从 documents 提取并添加到 NetworkX...")
-        graph_docs = builder.extract_and_save_batch(test_docs)
+        # Step 2: 提取（不建图）
+        print("\n[Step 2] 提取实体和关系（不建图）...")
+        graph_docs = builder.extract_batch(test_docs)
         print(f"  ✓ 提取完成：{len(graph_docs)} 个 GraphDocuments")
         for i, gd in enumerate(graph_docs):
             print(f"    - Chunk {i}: {len(gd.nodes)} 节点，{len(gd.relationships)} 关系")
 
-        # Step 3: 查看添加到 NetworkX 后的统计
-        print("\n[Step 3] 查看 NetworkX 统计（对齐前）...")
-        stats_before = builder.stats()
-        print(f"  ✓ 节点数：{stats_before['num_nodes']}")
-        print(f"  ✓ 关系数：{stats_before['num_relationships']}")
+        # Step 3: 对齐并建图
+        print("\n[Step 3] 消歧对齐并建图...")
+        result = builder.align_and_build(graph_docs)
+        print(f"  ✓ 建图完成:")
+        print(f"    - 实体数：{result['entities']}")
+        print(f"    - 关系数：{result['relationships']}")
+        print(f"    - Alias 组：{result['alias_groups']}")
 
-        # Step 4: 实体对齐
-        print("\n[Step 4] 执行实体对齐...")
-        align_result = builder.align_entities()
-        print(f"  ✓ 对齐完成:")
-        print(f"    - 处理的组数：{align_result['groups_processed']}")
-        print(f"    - 合并的实体：{align_result['entities_merged']}")
-        print(f"    - 转移的关系：{align_result['relationships_transferred']}")
+        # Step 4: 查看实体 chunk_ids（使用 _graph 直接访问，避免 lazy load 问题）
+        print("\n[Step 4] 查看实体的 chunk_ids...")
+        for entity in list(builder._graph.nodes())[:5]:
+            node_data = builder._graph.nodes[entity]
+            chunk_ids = node_data.get("chunk_ids", [])
+            node_type = node_data.get("node_type", "N/A")
+            print(f"  - {entity} ({node_type}): chunk_ids={chunk_ids}")
 
-        # Step 5: 查看对齐后的统计
-        print("\n[Step 5] 查看 NetworkX 统计（对齐后）...")
-        stats_after = builder.stats()
-        print(f"  ✓ 节点数：{stats_after['num_nodes']} (减少 {stats_before['num_nodes'] - stats_after['num_nodes']})")
-        print(f"  ✓ 关系数：{stats_after['num_relationships']}")
-
-        # Step 6: 列出所有实体
-        print("\n[Step 6] 列出图中的所有实体...")
+        # Step 5: 测试路径查找
+        print("\n[Step 5] 测试路径查找...")
         all_entities = list(builder.graph.nodes())
-        print(f"  ✓ 共 {len(all_entities)} 个实体:")
-        for entity in all_entities[:10]:
-            degree = builder.graph.degree(entity)
-            print(f"    - {entity} (度数：{degree})")
-        if len(all_entities) > 10:
-            print(f"    ... 还有 {len(all_entities) - 10} 个实体")
-
-        # Step 7: 测试路径查找（使用实际存在的实体）
-        print("\n[Step 7] 测试路径查找功能...")
         if len(all_entities) >= 2:
-            # 找一个有关系的实体对
             for edge in list(builder.graph.edges())[:1]:
                 source, target = edge
                 path = builder.find_shortest_path(source, target)
                 if path:
-                    print(f"  ✓ {source} -> {target} 的路径：{' -> '.join(path)}")
+                    print(f"  ✓ {source} -> {target}: {' -> '.join(path)}")
                 break
-        else:
-            print("  - 实体数量不足，跳过路径查找测试")
-
-        # Step 8: 测试邻居查询
-        print("\n[Step 8] 测试邻居查询功能...")
-        if all_entities:
-            # 找度数最高的实体
-            entity_with_most_neighbors = max(all_entities, key=lambda x: builder.graph.degree(x))
-            neighbors = builder.get_entity_neighbors(entity_with_most_neighbors)
-            if neighbors:
-                print(f"  ✓ {entity_with_most_neighbors} 的邻居 ({len(neighbors)}个):")
-                for neighbor, rel_type in neighbors[:5]:
-                    print(f"    - {neighbor} ({rel_type})")
 
         # 清理测试文件
         if Path("test_graph.pkl").exists():

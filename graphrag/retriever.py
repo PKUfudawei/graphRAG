@@ -17,7 +17,7 @@ parent_dir = os.path.dirname(script_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from graphrag.graph.graph_storage import get_neo4j_storage
+from graphrag.graph.storage import get_neo4j_storage
 from models.embedding import get_embedding
 
 

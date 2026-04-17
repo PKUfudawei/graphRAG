@@ -54,17 +54,8 @@ class Indexer:
         Returns:
             分块后的文档列表（每个 chunk 的 metadata 中包含 chunk_id）
         """
-        all_chunks = []
-        global_chunk_id = 0
-        for doc in tqdm(documents, desc="Indexing"):
-            chunks = self.chunker.create_documents(
-                [doc.page_content],
-                metadatas=[doc.metadata]
-            )
-            for chunk in chunks:
-                chunk.metadata["chunk_id"] = global_chunk_id
-                global_chunk_id += 1
-            all_chunks.extend(chunks)
+        # 使用 split_documents 方法，它会自动添加 chunk_id
+        all_chunks = self.chunker.split_documents(documents)
         return all_chunks
 
     def build_vectorstore(self, documents: List[Document]) -> FAISS:
@@ -77,11 +68,12 @@ class Indexer:
         Returns:
             FAISS 向量存储实例
         """
-        embeddings = self.embedding.embed_model if hasattr(self.embedding, 'embed_model') else self.embedding
-        return FAISS.from_documents(documents, embeddings)
+        embed_model = self.embedding.embed_model if hasattr(self.embedding, 'embed_model') else self.embedding
+        return FAISS.from_documents(documents, embed_model)
 
-    def save_vectorstore(self, vectorstore: FAISS, path: str):
+    def save_vectorstore(self, vectorstore: FAISS, path: str=None):
         """保存向量存储"""
+        path = path or self.vectorstore_path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         vectorstore.save_local(path)
         print(f"Vectorstore saved to {path}")

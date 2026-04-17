@@ -6,18 +6,16 @@
 
 实体属性:
 - chunk_ids: 集合，记录实体来自哪些 chunk
-- node_type: 实体类型（最常用）
+- type: 实体类型（最常用）
 """
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
-from pathlib import Path
+import os
 import pickle
 import networkx as nx
 from typing import Optional
 
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
-from tqdm import tqdm
 
 from .extractor import get_extractor
 from .resolver import get_resolver
@@ -27,85 +25,84 @@ class GraphBuilder:
     """Build knowledge graph from documents using NetworkX.
 
     Args:
-        entity_extractor: 实体提取器。
-        entity_resolver: 实体消歧器（用于 align_entities）。
+        extractor: 实体提取器。
+        resolver: 实体消歧器（用于 align_entities）。
         max_workers: 并行处理的最大工作线程数。
         storage_path: 图持久化路径。
     """
 
     def __init__(
         self,
-        entity_extractor=None,
-        entity_resolver=None,
+        extractor=None,
+        resolver=None,
         max_workers: int = 16,
-        storage_path: str = "graph_data.pkl",
+        storage_path: str = "graph.pkl",
     ):
         self.max_workers = max_workers
-        self.entity_extractor = entity_extractor or get_extractor()
-        self.entity_resolver = entity_resolver or get_resolver()
-        self.storage_path = Path(storage_path)
-        self._graph: Optional[nx.DiGraph] = None
+        self.storage_path = storage_path
+        self.extractor = extractor or get_extractor()
+        self.resolver = resolver or get_resolver()
+        self.built_graph = None
 
     @property
     def graph(self) -> nx.DiGraph:
         """Lazy load NetworkX graph."""
-        if self._graph is None:
-            self._graph = self._load_graph()
-        return self._graph
+        return self.built_graph if self.built_graph else self.load_graph()
 
-    def _load_graph(self) -> nx.DiGraph:
+    @staticmethod
+    def load_graph(self, path=None) -> nx.DiGraph:
         """Load graph from pickle file."""
-        if self.storage_path.exists():
-            with open(self.storage_path, "rb") as f:
+        path = path or self.storage_path
+        if os.path.exists(path):
+            with open(path, "rb") as f:
                 return pickle.load(f)
         return nx.DiGraph()
 
-    def _save_graph(self):
+    def save_graph(self):
         """Save graph to pickle file."""
+        dir_path = os.path.dirname(self.storage_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
         with open(self.storage_path, "wb") as f:
-            pickle.dump(self._graph, f)
+            pickle.dump(self.built_graph, f)
 
     def clear_graph(self):
         """Clear all data from graph."""
-        self._graph = nx.DiGraph()
-        if self.storage_path.exists():
-            self.storage_path.unlink()
+        if os.path.exists(self.storage_path):
+            os.remove(self.storage_path)
+
+    def stats(self) -> dict[str, int]:
+        """Get graph statistics.
+
+        Returns:
+            Dictionary with node and relationship counts.
+        """
+        return {
+            "num_nodes": self.graph.number_of_nodes(),
+            "num_relationships": self.graph.number_of_edges()
+        }
 
     # ==================== 提取阶段 ====================
 
-    def extract_batch(self, documents: list[Document]) -> list[GraphDocument]:
+    def extract_batch(
+        self,
+        documents: list[Document],
+        mode: str = "thread"
+    ) -> list[GraphDocument]:
         """并行提取所有 chunks 的实体和关系（不建图，不去重）。
 
         Args:
             documents: 输入的 LangChain Document 列表（chunks）。
+            mode: 提取模式。选项：
+                  - "async": 异步并发执行
+                  - "thread": 线程池并发执行（默认）
+                  - "sync": 顺序执行
 
         Returns:
             提取的 GraphDocument 列表（未去重，未建图）。
         """
-        if not documents:
-            return []
-
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(
-                    self.entity_extractor.extract,
-                    doc.page_content,
-                    str(doc.metadata.get("chunk_id", idx))
-                )
-                for idx, doc in enumerate(documents)
-            ]
-
-            for future in tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Extracting entities"
-            ):
-                results.append(future.result())
-
-        # 按 chunk_id 排序
-        results.sort(key=lambda g: int(g.source.metadata.get("source", 0)) if g.source else 0)
-        return results
+        # 直接使用 extractor 的 extract_batch 方法
+        return self.extractor.extract_batch(documents, mode=mode)
 
     # ==================== 对齐和建图阶段 ====================
 
@@ -128,14 +125,16 @@ class GraphBuilder:
         print("\n[Align Step 1] Collecting entities and relationships...")
 
         # entity_name -> {chunk_ids: set, types: Counter}
-        entity_info: dict[str, dict] = defaultdict(lambda: {"chunk_ids": set(), "types": Counter()})
+        entity_info: dict[str, dict] = defaultdict(lambda: {"source": set(), "chunk_ids": set(), "types": Counter()})
         # 收集所有关系 (source, target, rel_type, chunk_id)
         all_relationships = []
 
         for graph_doc in graph_docs:
-            chunk_id = int(graph_doc.source.metadata.get("source", 0))
+            chunk_id = int(graph_doc.source.metadata.get("chunk_id", -1))
+            entity_source = graph_doc.source.metadata.get("source", "")
 
             for node in graph_doc.nodes:
+                entity_info[node.id]["source"].add(entity_source)
                 entity_info[node.id]["chunk_ids"].add(chunk_id)
                 entity_info[node.id]["types"][node.type] += 1
 
@@ -158,7 +157,7 @@ class GraphBuilder:
 
         # Step 2: 用 embedding 找 alias
         print("\n[Align Step 2] Finding aliases using embedding similarity...")
-        alias_map = self.entity_resolver.find_aliases(entity_names)
+        alias_map = self.resolver.find_aliases(entity_names)
 
         # 构建 canonical 映射
         name_to_canonical = {name: alias_map.get(name, name) for name in entity_names}
@@ -185,7 +184,7 @@ class GraphBuilder:
             most_common_type = info["types"].most_common(1)[0][0]
             new_graph.add_node(
                 canonical,
-                node_type=most_common_type,
+                type=most_common_type,
                 chunk_ids=sorted(info["chunk_ids"])  # 转换为列表以便 pickle
             )
 
@@ -210,17 +209,13 @@ class GraphBuilder:
             )
 
         # 赋值并持久化到磁盘
-        self._graph = new_graph
-        self._save_graph()
+        self.built_graph = new_graph
+        self.save_graph()
 
         stats = self.stats()
         print(f"\n[Build Complete] Graph built: {stats['num_nodes']} nodes, {stats['num_relationships']} relationships")
 
-        return {
-            "entities": stats["num_nodes"],
-            "relationships": stats["num_relationships"],
-            "alias_groups": len(alias_groups)
-        }
+        return self.built_graph
 
     # ==================== 便捷方法：一站式提取 + 对齐 + 建图 ====================
 
@@ -238,84 +233,18 @@ class GraphBuilder:
         graph_docs = self.extract_batch(documents)
         return self.align_and_build(graph_docs)
 
-    # ==================== 查询方法 ====================
-
-    def stats(self) -> dict[str, int]:
-        """Get graph statistics.
-
-        Returns:
-            Dictionary with node and relationship counts.
-        """
-        return {
-            "num_nodes": self.graph.number_of_nodes(),
-            "num_relationships": self.graph.number_of_edges()
-        }
-
-    def find_shortest_path(self, source: str, target: str) -> Optional[list[str]]:
-        """Find shortest path between two entities.
-
-        Args:
-            source: Source entity ID.
-            target: Target entity ID.
-
-        Returns:
-            List of entity IDs representing the path, or None if no path exists.
-        """
-        try:
-            return nx.shortest_path(self.graph, source, target)
-        except nx.NetworkXNoPath:
-            return None
-
-    def get_entity_neighbors(self, entity_id: str, max_neighbors: int = 10) -> list[tuple[str, str]]:
-        """Get neighbors of an entity.
-
-        Args:
-            entity_id: Entity ID to get neighbors for.
-            max_neighbors: Maximum number of neighbors to return.
-
-        Returns:
-            List of (neighbor_id, rel_type) tuples.
-        """
-        if entity_id not in self.graph:
-            return []
-
-        neighbors = []
-        # 出边邻居
-        for target in list(self.graph.successors(entity_id))[:max_neighbors]:
-            rel_type = self.graph[entity_id][target].get("rel_type", "RELATED_TO")
-            neighbors.append((target, rel_type))
-        # 入边邻居
-        for source in list(self.graph.predecessors(entity_id))[:max_neighbors]:
-            rel_type = self.graph[source][entity_id].get("rel_type", "RELATED_TO")
-            neighbors.append((source, rel_type))
-
-        return neighbors
-
-    def get_entity_chunk_ids(self, entity_id: str) -> list[int]:
-        """Get chunk IDs where an entity appears.
-
-        Args:
-            entity_id: Entity ID.
-
-        Returns:
-            List of chunk IDs.
-        """
-        if entity_id not in self.graph:
-            return []
-        return self.graph[entity_id].get("chunk_ids", [])
-
 
 def get_graph_builder(
-    entity_extractor=None,
-    entity_resolver=None,
+    extractor=None,
+    resolver=None,
     max_workers=16,
-    storage_path="graph_data.pkl",
+    storage_path="graph.pkl",
 ) -> GraphBuilder:
     """Get a GraphBuilder instance.
 
     Args:
-        entity_extractor: Optional entity extractor instance.
-        entity_resolver: Optional entity resolver instance.
+        extractor: Optional entity extractor instance.
+        resolver: Optional entity resolver instance.
         max_workers: Maximum number of concurrent workers. Default is 16.
         storage_path: Path to persist the graph. Default is "graph_data.pkl".
 
@@ -323,8 +252,8 @@ def get_graph_builder(
         GraphBuilder instance.
     """
     return GraphBuilder(
-        entity_extractor=entity_extractor,
-        entity_resolver=entity_resolver,
+        extractor=extractor,
+        resolver=resolver,
         max_workers=max_workers,
         storage_path=storage_path,
     )
@@ -334,7 +263,7 @@ if __name__ == "__main__":
     from langchain_core.documents import Document
 
     print("=" * 60)
-    print("GraphBuilder 新流程测试：提取 -> 对齐 -> 建图")
+    print("GraphBuilder 测试：build_from_documents + stats")
     print("=" * 60)
 
     # 创建测试文档
@@ -357,51 +286,26 @@ if __name__ == "__main__":
         ),
     ]
 
+    storage_path = "test_graph.pkl"
     try:
         # Step 1: 创建 Builder
         print("\n[Step 1] 创建 GraphBuilder...")
-        builder = get_graph_builder(storage_path="test_graph.pkl")
+        builder = get_graph_builder(storage_path=storage_path)
         builder.clear_graph()
         print("  ✓ GraphBuilder 创建成功")
 
-        # Step 2: 提取（不建图）
-        print("\n[Step 2] 提取实体和关系（不建图）...")
-        graph_docs = builder.extract_batch(test_docs)
-        print(f"  ✓ 提取完成：{len(graph_docs)} 个 GraphDocuments")
-        for i, gd in enumerate(graph_docs):
-            print(f"    - Chunk {i}: {len(gd.nodes)} 节点，{len(gd.relationships)} 关系")
-
-        # Step 3: 对齐并建图
-        print("\n[Step 3] 消歧对齐并建图...")
-        result = builder.align_and_build(graph_docs)
+        # Step 2: 一站式建图
+        print("\n[Step 2] 使用 build_from_documents 一站式建图...")
+        result = builder.build_from_documents(test_docs)
         print(f"  ✓ 建图完成:")
         print(f"    - 实体数：{result['entities']}")
         print(f"    - 关系数：{result['relationships']}")
-        print(f"    - Alias 组：{result['alias_groups']}")
+        print(f"    - Aliases：{result['alias_groups']}")
 
-        # Step 4: 查看实体 chunk_ids（使用 _graph 直接访问，避免 lazy load 问题）
-        print("\n[Step 4] 查看实体的 chunk_ids...")
-        for entity in list(builder._graph.nodes())[:5]:
-            node_data = builder._graph.nodes[entity]
-            chunk_ids = node_data.get("chunk_ids", [])
-            node_type = node_data.get("node_type", "N/A")
-            print(f"  - {entity} ({node_type}): chunk_ids={chunk_ids}")
-
-        # Step 5: 测试路径查找
-        print("\n[Step 5] 测试路径查找...")
-        all_entities = list(builder.graph.nodes())
-        if len(all_entities) >= 2:
-            for edge in list(builder.graph.edges())[:1]:
-                source, target = edge
-                path = builder.find_shortest_path(source, target)
-                if path:
-                    print(f"  ✓ {source} -> {target}: {' -> '.join(path)}")
-                break
 
         # 清理测试文件
-        if Path("test_graph.pkl").exists():
-            Path("test_graph.pkl").unlink()
-            print("\n[清理] 已删除测试文件 test_graph.pkl")
+        builder.clear_graph()
+        print(f"\n[清理] 已删除测试文件 {storage_path}")
 
         print("\n" + "=" * 60)
         print("测试完成！")

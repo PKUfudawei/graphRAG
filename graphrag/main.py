@@ -5,11 +5,13 @@ GraphRAG 系统主模块 - 使用 GraphRAGIndexer 和 GraphRAGRetriever
 import os
 import sys
 import argparse
+import pickle
 from glob import glob
 from tqdm import tqdm
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
+from langchain_community.vectorstores import FAISS
 
 # Add paths
 script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +21,7 @@ if script_dir not in sys.path:
 from graphrag.indexer import get_graphrag_indexer
 from graphrag.retriever import get_graphrag_retriever
 from models.llm import get_llm
+from models.embedding import get_embedding
 
 
 def parse_arguments():
@@ -26,7 +29,7 @@ def parse_arguments():
     parser.add_argument("-b", "--build", type=str, help="构建索引：指定文件路径或 glob 模式")
     parser.add_argument("-q", "--query", type=str, help="单次查询")
     parser.add_argument("-i", "--interact", action="store_true", help="交互模式")
-    parser.add_argument("-s", "--storage", type=str, default="../data/graphrag_index",
+    parser.add_argument("-s", "--storage", type=str, default="./database/graphrag_index",
                         help="索引存储路径")
     parser.add_argument("--chunk_size", type=int, default=512)
     parser.add_argument("--overlap", type=int, default=50)
@@ -37,6 +40,7 @@ def parse_arguments():
     parser.add_argument("--vector_weight", type=float, default=0.5)
     parser.add_argument("--graph_weight", type=float, default=0.5)
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-m3")
+    parser.add_argument("--max_workers", type=int, default=16, help="并行提取的最大工作线程数")
 
     args = parser.parse_args()
     return args, parser
@@ -45,15 +49,10 @@ def parse_arguments():
 def build_index(
     files,
     storage_path: str,
-    chunk_size: int = 512,
-    overlap: int = 50,
-    embedding_model: str = "BAAI/bge-m3"
+    max_workers: int = 16
 ) -> None:
     """构建 GraphRAG 索引（向量 + 图谱 + 实体 embedding）"""
     print(f"Building GraphRAG index from {len(files)} files...")
-
-    # 创建索引器
-    indexer = get_graphrag_indexer()
 
     # 读取文件并创建 Document 对象
     documents = []
@@ -65,42 +64,52 @@ def build_index(
             metadata={"source": file_path}
         ))
 
-    # Step 1: 分块
-    print("\n[Step 1] Chunking documents...")
-    chunks = indexer.index_documents(documents)
-    print(f"  Generated {len(chunks)} chunks")
-
-    # Step 2: 构建图谱（提取 -> 对齐 -> 建图）
-    print("\n[Step 2] Building knowledge graph...")
-    indexer.clear_graph()
-    graph_result = indexer.build_graph_from_chunks(chunks)
-    print(f"  Graph: {graph_result['entities']} entities, {graph_result['relationships']} relationships")
-
-    # Step 3: 实体向量索引
-    print("\n[Step 3] Indexing entities...")
-    entity_count = indexer.index_entities()
-    print(f"  Indexed {entity_count} entities")
-
-    # Step 4: 保存索引
-    print(f"\n[Step 4] Saving index to {storage_path}...")
-    indexer.save(storage_path)
+    # 使用 GraphRAGIndexer 的一站式索引方法
+    indexer = get_graphrag_indexer(max_workers=max_workers)
+    chunks, vectorstore, graph, entity_index = indexer.index_documents(documents, database_path=storage_path)
 
     print("\n" + "=" * 60)
     print("Index built successfully!")
     print(f"  Chunks: {len(chunks)}")
-    print(f"  Entities: {graph_result['entities']}")
-    print(f"  Relationships: {graph_result['relationships']}")
+    print(f"  Entities: {graph.number_of_nodes()}")
+    print(f"  Relationships: {graph.number_of_edges()}")
     print("=" * 60)
 
 
 def load_index(storage_path: str):
     """加载 GraphRAG 索引"""
-    if not os.path.exists(storage_path):
-        raise FileNotFoundError(f"Index not found at {storage_path}")
+    # 加载 graph
+    graph_path = os.path.join(storage_path, 'graph.pkl')
+    if not os.path.exists(graph_path):
+        raise FileNotFoundError(f"Graph not found at {graph_path}")
+    with open(graph_path, "rb") as f:
+        graph = pickle.load(f)
 
-    indexer = get_graphrag_indexer()
-    indexer.load(storage_path)
-    return indexer
+    # 加载 entities
+    entities_path = os.path.join(storage_path, 'entities.pkl')
+    if not os.path.exists(entities_path):
+        raise FileNotFoundError(f"Entities not found at {entities_path}")
+    with open(entities_path, "rb") as f:
+        entities_data = pickle.load(f)
+
+    # 加载 vectorstore
+    vectorstore_path = os.path.join(storage_path, 'vectorstore')
+    if not os.path.exists(vectorstore_path):
+        raise FileNotFoundError(f"Vectorstore not found at {vectorstore_path}")
+    embedding = get_embedding()
+    vectorstore = FAISS.load_local(
+        vectorstore_path,
+        embedding,
+        allow_dangerous_deserialization=True
+    )
+
+    return {
+        "graph": graph,
+        "entity_index": entities_data["index"],
+        "entity_metadata": entities_data["metadata"],
+        "vectorstore": vectorstore,
+        "embedding": embedding
+    }
 
 
 def generate_answer(query: str, context_docs, llm=None) -> str:
@@ -164,26 +173,25 @@ def main():
         build_index(
             files,
             args.storage,
-            args.chunk_size,
-            args.overlap,
-            args.embedding_model
+            args.max_workers
         )
         return
 
     # 查询/交互模式
     print("Loading index...")
     try:
-        indexer = load_index(args.storage)
+        index_data = load_index(args.storage)
     except Exception as e:
         print(f"Error loading index: {e}")
         return
 
     # 创建检索器
     retriever = get_graphrag_retriever(
-        graph_builder=indexer.graph_builder,
-        entity_index=indexer._entity_index,
-        entity_metadata=indexer._entity_metadata,
-        embedding=indexer.embedding
+        graph=index_data["graph"],
+        entity_index=index_data["entity_index"],
+        entity_metadata=index_data["entity_metadata"],
+        vectorstore=index_data["vectorstore"],
+        embedding=index_data["embedding"]
     )
 
     llm = get_llm(streaming=True)

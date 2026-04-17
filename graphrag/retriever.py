@@ -9,36 +9,30 @@ import numpy as np
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 
-from graphrag.graph.builder import GraphBuilder
-
-
 class GraphRAGRetriever:
     """GraphRAG 检索器 - 支持向量检索、图谱检索和多跳遍历
 
     Args:
-        graph_builder: GraphBuilder 实例（包含 NetworkX 图）
+        graph: Graph 实例（包含 NetworkX 图）
         entity_index: FAISS 实体向量索引
         entity_metadata: 实体元数据列表
         embedding: 嵌入模型
-        vector_index: FAISS 文档向量索引（可选）
-        vector_metadata: 文档向量元数据（可选）
+        vectorstore: LangChain FAISS vectorstore（可选）
     """
 
     def __init__(
         self,
-        graph_builder: GraphBuilder,
+        graph,
         entity_index: Optional[faiss.Index] = None,
         entity_metadata: Optional[List[dict]] = None,
         embedding=None,
-        vector_index: Optional[faiss.Index] = None,
-        vector_metadata: Optional[List[dict]] = None,
+        vectorstore=None,
     ):
-        self.graph_builder = graph_builder
+        self.graph = graph
         self.entity_index = entity_index
         self.entity_metadata = entity_metadata or []
         self.embedding = embedding
-        self.vector_index = vector_index
-        self.vector_metadata = vector_metadata or []
+        self.vectorstore = vectorstore
 
     def search_vectors(
         self,
@@ -54,29 +48,23 @@ class GraphRAGRetriever:
         Returns:
             (文档，相似度分数) 元组列表
         """
-        if self.vector_index is None or self.vector_index.ntotal == 0:
+        if self.vectorstore is None or self.embedding is None:
             return []
 
-        # 生成查询嵌入
-        query_embedding = self.embedding.encode([query])
-        query_array = np.array(query_embedding, dtype=np.float32)
+        # 手动生成查询嵌入并搜索
+        # EmbeddingWrapper 使用 encode 方法
+        query_embedding = self.embedding.encode([query])[0]
 
-        # FAISS 搜索
-        distances, indices = self.vector_index.search(
-            query_array, min(top_k, self.vector_index.ntotal)
-        )
+        # 使用 FAISS 底层索引搜索
+        index = self.vectorstore.index
+        scores, indices = index.search(np.array([query_embedding], dtype=np.float32), k=top_k)
 
         results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx >= 0 and idx < len(self.vector_metadata):
-                metadata = self.vector_metadata[idx]
-                doc = Document(
-                    page_content=metadata["content"],
-                    metadata={"source": metadata["source"], "retrieval_type": "vector"}
-                )
-                # 距离越小越相似，转换为相似度分数
-                similarity = 1.0 / (1.0 + dist)
-                results.append((doc, float(similarity)))
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and idx < len(self.vectorstore.docstore._dict):
+                doc_id = list(self.vectorstore.docstore._dict.keys())[idx]
+                doc = self.vectorstore.docstore.search(doc_id)
+                results.append((doc, float(score)))
 
         return results
 
@@ -110,7 +98,8 @@ class GraphRAGRetriever:
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and idx < len(self.entity_metadata):
                 metadata = self.entity_metadata[idx]
-                results.append((metadata["entity_id"], metadata, float(score)))
+                entity_name = metadata.get("name", "")
+                results.append((entity_name, metadata, float(score)))
 
         return results
 
@@ -130,7 +119,7 @@ class GraphRAGRetriever:
         Returns:
             包含遍历结果的 GraphDocument
         """
-        graph = self.graph_builder.graph
+        graph = self.graph
         visited_nodes: Set[str] = set()
         nodes: List[Node] = []
         node_map: Dict[str, Node] = {}
@@ -141,7 +130,7 @@ class GraphRAGRetriever:
             # 尝试精确匹配
             if entity in graph:
                 node_data = graph.nodes[entity]
-                node = Node(id=entity, type=node_data.get("node_type", "Entity"))
+                node = Node(id=entity, type=node_data.get("type", "Entity"))
                 nodes.append(node)
                 node_map[entity] = node
                 visited_nodes.add(entity)
@@ -175,14 +164,14 @@ class GraphRAGRetriever:
                 # 确保当前节点在 map 中
                 if current_entity not in node_map:
                     node_data = graph.nodes[current_entity]
-                    node = Node(id=current_entity, type=node_data.get("node_type", "Entity"))
+                    node = Node(id=current_entity, type=node_data.get("type", "Entity"))
                     nodes.append(node)
                     node_map[current_entity] = node
 
                 # 添加邻居节点
                 visited_nodes.add(neighbor_id)
                 neighbor_data = graph.nodes[neighbor_id]
-                neighbor_node = Node(id=neighbor_id, type=neighbor_data.get("node_type", "Entity"))
+                neighbor_node = Node(id=neighbor_id, type=neighbor_data.get("type", "Entity"))
                 nodes.append(neighbor_node)
                 node_map[neighbor_id] = neighbor_node
 
@@ -261,7 +250,7 @@ class GraphRAGRetriever:
 
                 # 添加实体信息
                 for node in graph_doc.nodes:
-                    chunk_ids = self.graph_builder.get_entity_chunk_ids(node.id)
+                    chunk_ids = self.graph.nodes[node.id].get("chunk_ids", [])
                     context_lines.append(f"Entity: {node.id} (Type: {node.type}, Chunks: {chunk_ids})")
 
                 # 添加关系信息
@@ -292,64 +281,80 @@ class GraphRAGRetriever:
 
 
 def get_graphrag_retriever(
-    graph_builder: GraphBuilder,
+    graph,
     entity_index: Optional[faiss.Index] = None,
     entity_metadata: Optional[List[dict]] = None,
     embedding=None,
-    vector_index: Optional[faiss.Index] = None,
-    vector_metadata: Optional[List[dict]] = None,
+    vectorstore=None,
 ) -> GraphRAGRetriever:
     """获取 GraphRAG 检索器实例
 
     Args:
-        graph_builder: GraphBuilder 实例
+        graph: graph 实例
         entity_index: FAISS 实体向量索引
         entity_metadata: 实体元数据列表
         embedding: 嵌入模型
-        vector_index: FAISS 文档向量索引
-        vector_metadata: 文档向量元数据
+        vectorstore: LangChain FAISS vectorstore
 
     Returns:
         GraphRAGRetriever 实例
     """
     return GraphRAGRetriever(
-        graph_builder=graph_builder,
+        graph=graph,
         entity_index=entity_index,
         entity_metadata=entity_metadata,
         embedding=embedding,
-        vector_index=vector_index,
-        vector_metadata=vector_metadata,
+        vectorstore=vectorstore,
     )
 
 
 if __name__ == "__main__":
+    import pickle
     print("=" * 60)
     print("GraphRAGRetriever 测试")
     print("=" * 60)
 
     from graphrag.indexer import get_graphrag_indexer
 
-    # 准备数据
-    print("\n[Test 1] Index documents...")
-    indexer = get_graphrag_indexer()
-    texts = [
-        "北京是中国的首都，位于华北平原。北京拥有丰富的历史文化遗产。",
-        "上海是中国最大的城市，位于长江入海口。上海是国际金融中心。",
-    ]
-    documents = [Document(page_content=t, metadata={"source": f"text{i+1}"}) for i, t in enumerate(texts)]
-    chunks = indexer.index_documents(documents)
-    indexer.clear_graph()
-    indexer.build_graph_from_chunks(chunks)
-    indexer.index_entities()
-    print("  ✓ Passed")
+    # 加载已生成的索引
+    print("\n[Test 1] Loading index from ./database...")
+    storage_path = "./database"
+
+    # 加载 graph
+    graph_path = f"{storage_path}/graph.pkl"
+    with open(graph_path, "rb") as f:
+        graph = pickle.load(f)
+    print(f"  Loaded graph with {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+    # 加载 entities
+    entities_path = f"{storage_path}/entities.pkl"
+    with open(entities_path, "rb") as f:
+        entities_data = pickle.load(f)
+    entity_index = entities_data["index"]
+    entity_metadata = entities_data["metadata"]
+    print(f"  Loaded {entity_index.ntotal} entities")
+
+    # 加载 vectorstore
+    from langchain_community.vectorstores import FAISS
+    vectorstore_path = f"{storage_path}/vectorstore"
+    from models.embedding import get_embedding
+    embedding = get_embedding()
+    vectorstore = FAISS.load_local(
+        vectorstore_path,
+        embedding,
+        allow_dangerous_deserialization=True
+    )
+    print(f"  Loaded vectorstore")
+
 
     # 创建检索器
     print("\n[Test 2] Create retriever...")
     retriever = get_graphrag_retriever(
-        graph_builder=indexer.graph_builder,
-        entity_index=indexer._entity_index,
-        entity_metadata=indexer._entity_metadata,
-        embedding=indexer.embedding
+        graph=graph,
+        entity_index=entity_index,
+        entity_metadata=entity_metadata,
+        embedding=embedding,
+        vectorstore=vectorstore
     )
     print("  ✓ Passed")
 
@@ -358,12 +363,12 @@ if __name__ == "__main__":
     entity_results = retriever.search_entities("中国的首都", top_k=3)
     print(f"  Found {len(entity_results)} entities")
     for name, metadata, score in entity_results:
-        print(f"    - {name} ({metadata['node_type']}) (score: {score:.4f})")
+        print(f"    - {name} ({metadata.get('type', metadata.get('type', 'Unknown'))}) (score: {score:.4f})")
     print("  ✓ Passed")
 
     # 测试多跳遍历
     print("\n[Test 4] Multi-hop traversal...")
-    graph_doc = retriever.traverse_multi_hop(["北京"], max_hops=2, max_neighbors=5)
+    graph_doc = retriever.traverse_multi_hop(["北京市"], max_hops=2, max_neighbors=5)
     print(f"  Nodes: {len(graph_doc.nodes)}")
     print(f"  Relationships: {len(graph_doc.relationships)}")
     for node in graph_doc.nodes:
@@ -376,6 +381,7 @@ if __name__ == "__main__":
     print("\n[Test 5] Hybrid retrieval...")
     hybrid_results = retriever.retrieve(
         "中国的首都是哪里？",
+        top_k_vectors=3,
         top_k_entities=3,
         max_hops=2,
         graph_weight=0.7
@@ -383,7 +389,8 @@ if __name__ == "__main__":
     print(f"  Found {len(hybrid_results)} results")
     for doc in hybrid_results:
         print(f"    [{doc.metadata.get('retrieval_type')}] score: {doc.metadata.get('score', 0):.4f}")
-        print(f"      {doc.page_content[:100]}...")
+        content = doc.page_content[:100] if len(doc.page_content) > 100 else doc.page_content
+        print(f"      {content}...")
     print("  ✓ Passed")
 
     print("\n" + "=" * 60)

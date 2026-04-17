@@ -208,7 +208,7 @@ __marimo__/
 
 # Customized
 checkpoints/
-data/
+data*/
 .omc/
 .claude/
 

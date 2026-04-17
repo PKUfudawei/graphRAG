@@ -2,6 +2,7 @@
 import os
 import sys
 import warnings
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
@@ -16,7 +17,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from models.graph import ExtractionResult
+from models.extraction_result import ExtractionResult
 from models.llm import get_llm
 
 
@@ -55,53 +56,17 @@ All source and target in relationships must exist in entities."""),
             ("human", "Text: {text}")
         ])
 
-    def extract(self, text: str, source: Optional[str] = None) -> GraphDocument:
-        """Extract entities and relations using json_schema structured output.
-
-        Args:
-            text: Input text.
-            source: Optional source identifier.
-
-        Returns:
-            LangChain GraphDocument instance.
-        """
-        try:
-            # Use json_schema method for structured output
-            structured_llm = self.llm.with_structured_output(
-                ExtractionResult,
-                method="json_schema",
-                include_raw=False,
-                strict=True,
-            )
-            chain = self.prompt | structured_llm
-            result: ExtractionResult = chain.invoke({"text": text})
-
-            return self._parse_to_graph_document(result, text, source)
-        except Exception as e:
-            print(f"\tError in entity extraction: {e}")
-            return self._empty_graph_document(text, source)
-
-    def _parse_to_graph_document(
-        self, result: ExtractionResult, text: str, source: Optional[str]
-    ) -> GraphDocument:
-        """Parse ExtractionResult to LangChain GraphDocument with validation.
-
-        First validates that all edges reference existing entities.
-        If validation fails, automatically adds missing entities.
-        """
+    def _build_graph_document(self, result: ExtractionResult, document: Document) -> GraphDocument:
+        """Build GraphDocument from ExtractionResult."""
+        # Validate and fix orphan edges
         try:
             result.validate_edges_reference_existing_entities()
-        except ValueError as e:
-            print(f"\tValidation warning: {e}")
-            print(f"\tFixing orphan edges...")
+        except ValueError:
             result.fix_orphan_edges()
 
+        # Build nodes
         nodes_data = result.get_nodes()
-        nodes = [
-            Node(id=node.name, type=node.type)
-            for node in nodes_data
-        ]
-
+        nodes = [Node(id=node.name, type=node.type) for node in nodes_data]
         node_map = {node.id: node for node in nodes}
 
         # Ensure all edge nodes exist
@@ -111,6 +76,7 @@ All source and target in relationships must exist in entities."""),
             if edge.target not in node_map:
                 node_map[edge.target] = Node(id=edge.target, type="entity")
 
+        # Build relationships
         relationships = [
             Relationship(
                 source=node_map[edge.source],
@@ -120,61 +86,126 @@ All source and target in relationships must exist in entities."""),
             for edge in result.get_edges()
         ]
 
-        source_doc = Document(
-            page_content=text,
-            metadata={"source": source}
-        ) if text else Document(page_content="", metadata={"source": source})
-
         return GraphDocument(
             nodes=nodes,
             relationships=relationships,
-            source=source_doc
+            source=document,
         )
 
-    def _empty_graph_document(self, text: str, source: Optional[str]) -> GraphDocument:
-        """Return an empty GraphDocument."""
-        source_doc = Document(
-            page_content=text,
-            metadata={"source": source}
-        ) if text else Document(page_content="", metadata={"source": source})
-        return GraphDocument(nodes=[], relationships=[], source=source_doc)
+    def extract(self, document: Document) -> GraphDocument:
+        """Extract entities and relations using json_schema structured output.
+
+        Args:
+            document: Input LangChain Document.
+
+        Returns:
+            LangChain GraphDocument instance.
+        """
+        text = document.page_content
+
+        try:
+            structured_llm = self.llm.with_structured_output(
+                ExtractionResult,
+                method="json_schema",
+                include_raw=False,
+                strict=True,
+            )
+            chain = self.prompt | structured_llm
+            result: ExtractionResult = chain.invoke({"text": text})
+            return self._build_graph_document(result, document)
+        except Exception as e:
+            print(f"\tError in entity extraction: {e}")
+            return GraphDocument(nodes=[], relationships=[], source=document)
+
+    async def aextract(self, document: Document) -> GraphDocument:
+        """Async extract entities and relations.
+
+        Args:
+            document: Input LangChain Document.
+
+        Returns:
+            LangChain GraphDocument instance.
+        """
+        text = document.page_content
+
+        try:
+            structured_llm = self.llm.with_structured_output(
+                ExtractionResult,
+                method="json_schema",
+                include_raw=False,
+                strict=True,
+            )
+            chain = self.prompt | structured_llm
+            result: ExtractionResult = await chain.ainvoke({"text": text})
+            return self._build_graph_document(result, document)
+        except Exception as e:
+            print(f"\tError in entity extraction: {e}")
+            return GraphDocument(nodes=[], relationships=[], source=document, metadata=document.metadata)
 
     def extract_batch(
         self,
-        texts: List[str],
-        sources: Optional[List[str]] = None,
-        parallel: bool = True
+        documents: List[Document],
+        mode: str = "thread"
     ) -> List[GraphDocument]:
-        """Batch extract entities and relations from multiple texts.
+        """Batch extract entities and relations from multiple documents.
 
         Args:
-            texts: List of input texts.
-            sources: Optional list of source identifiers.
-            parallel: If True, use parallel extraction. Default is True.
+            documents: List of input LangChain Documents.
+            mode: Execution mode. Options:
+                  - "async": Async concurrent execution (recommended for I/O bound)
+                  - "thread": Thread pool concurrent execution
+                  - "sync": Sequential execution
 
         Returns:
             List of LangChain GraphDocument instances.
         """
-        if sources is None:
-            sources = [None] * len(texts)
+        if mode not in ['sync', 'thread', 'async']:
+            raise ValueError(f"Invalid mode '{mode}'. Must be one of: 'sync', 'thread', 'async'")
 
-        if not parallel:
-            return [self.extract(text, source) for text, source in zip(texts, sources)]
+        if not documents:
+            return []
 
+        if mode == "async":
+            return asyncio.run(self._extract_batch_async(documents))
+        elif mode == "thread":
+            return self._extract_batch_thread(documents)
+        else:  # mode == "sync"
+            return [self.extract(doc) for doc in documents]
+
+    def _extract_batch_thread(self, documents: List[Document]) -> List[GraphDocument]:
+        """Thread pool batch extraction with progress bar."""
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(self.extract, text, source)
-                for text, source in zip(texts, sources)
-            ]
+            futures = [executor.submit(self.extract, doc) for doc in documents]
 
             for future in tqdm(
                 as_completed(futures), total=len(futures),
-                desc="Extracting entities and relations"
+                desc="Extracting (thread)"
             ):
                 results.append(future.result())
 
+        # 按原始顺序返回
+        results.sort(key=lambda r: r.source.metadata.get("chunk_id", 0))
         return results
+
+    async def _extract_batch_async(self, documents: List[Document]) -> List[GraphDocument]:
+        """Async batch extraction with concurrency limit and progress bar."""
+        semaphore = asyncio.Semaphore(self.max_workers)
+
+        # 创建进度条
+        pbar = tqdm(total=len(documents), desc="Extracting (async)", unit="doc")
+
+        async def extract_with_limit(doc: Document) -> GraphDocument:
+            result = await self.aextract(doc)
+            pbar.update(1)
+            return result
+
+        # 并发执行所有任务
+        tasks = [extract_with_limit(doc) for doc in documents]
+        results = await asyncio.gather(*tasks)
+
+        pbar.close()
+        return list(results)
 
 
 def get_extractor(

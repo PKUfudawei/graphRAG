@@ -102,7 +102,10 @@ class Chunker(TokenTextSplitter):
             truncated_text = self.truncate(doc.page_content)
             texts.append(truncated_text)
             metadatas.append(doc.metadata)
-        return self.create_documents(texts, metadatas=metadatas)
+        chunks = self.create_documents(texts, metadatas=metadatas)
+        for idx, chunk in enumerate(chunks):
+            chunk.metadata['chunk_id'] = idx
+        return chunks
 
 
 def get_chunker(

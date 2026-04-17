@@ -226,12 +226,15 @@ def get_extractor(
 
 
 if __name__ == "__main__":
+    from langchain_core.documents import Document
+
     extractor = get_extractor()
 
     text = "Ebenezer Scrooge is a wealthy but miserly businessman in Victorian London. " \
            "He is visited by the ghost of his former partner Jacob Marley on Christmas Eve."
 
-    result = extractor.extract(text, source="test")
+    doc = Document(page_content=text, metadata={"source": "test"})
+    result = extractor.extract(doc)
     print(f"Nodes: {len(result.nodes)}")
     print(f"Relationships: {len(result.relationships)}")
     for node in result.nodes:

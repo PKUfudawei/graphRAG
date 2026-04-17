@@ -180,20 +180,18 @@ def get_retriever(
 
 
 if __name__ == "__main__":
-    from indexer import get_indexer
+    from rag.indexer import get_indexer
+    from models.chunker import get_chunker
+    from models.embedding import get_embedding
 
     print("=" * 60)
     print("Retriever 模块测试")
     print("=" * 60)
 
     # 使用 indexer 创建向量索引
-    indexer = get_indexer(
-        chunk_model="cl100k_base",
-        chunk_size=100,
-        overlap=20,
-        embed_model="BAAI/bge-m3",
-        embed_device="cuda:0",
-    )
+    chunker = get_chunker(model="cl100k_base", chunk_size=100, overlap=20)
+    embedding = get_embedding(model="BAAI/bge-m3", device="cuda:0")
+    indexer = get_indexer(chunker=chunker, embedding=embedding)
 
     texts = [
         "The capital of China is Beijing. Beijing is the capital city of the People's Republic of China.",
@@ -241,15 +239,18 @@ if __name__ == "__main__":
         print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
     print()
 
-    # 测试 3: hybrid_search 方法（带 BM25）
+    # 测试 3: hybrid_search 方法（带 BM25）- 需要 rank_bm25 依赖
     print("-" * 40)
     print("测试 3: hybrid_search 方法（带 BM25）")
     print("-" * 40)
-    retriever.set_bm25_retriever(chunks)
-    results = retriever.hybrid_search("programming language for web")
-    print(f"✓ hybrid_search 检索到 {len(results)} 个文档:")
-    for i, doc in enumerate(results, 1):
-        print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
+    try:
+        retriever.set_bm25_retriever(chunks)
+        results = retriever.hybrid_search("programming language for web")
+        print(f"✓ hybrid_search 检索到 {len(results)} 个文档:")
+        for i, doc in enumerate(results, 1):
+            print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
+    except ImportError as e:
+        print(f"⚠ 跳过：{e}")
     print()
 
     # 测试 4: 不同的查询

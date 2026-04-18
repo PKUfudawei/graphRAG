@@ -66,27 +66,103 @@ class GraphRAGIndexer(Indexer):
         """
         return self.graph_builder.build_from_documents(chunks)
 
-    def index_documents(self, documents, database_path='./database') -> int:
+    def index_documents(
+        self,
+        documents,
+        database_path,
+        incremental: bool = False
+    ) -> tuple:
         """索引文档：分块 + 建向量索引 + 建图谱 + 建实体索引。
 
         Args:
             documents: 输入的 Document 列表。
+            database_path: 数据库存储路径。
+            incremental: 是否增量更新。True 时只处理新增文档。
 
         Returns:
-            分块的 chunk 数量。
+            (chunks, vectorstore, graph, entity_index) 元组。
         """
+        import hashlib
+        import pickle
+
+        # 增量模式下，先加载已有图的 file_hashes
+        existing_file_hashes = set()
+        if incremental:
+            graph_path = os.path.join(database_path, 'graph.pkl')
+            if os.path.exists(graph_path):
+                with open(graph_path, 'rb') as f:
+                    existing_graph = pickle.load(f)
+                for node, data in existing_graph.nodes(data=True):
+                    chunk_ids = data.get("chunk_ids", [])
+                    for cid in chunk_ids:
+                        if isinstance(cid, str) and "_" in cid:
+                            existing_file_hashes.add(cid.split("_")[0])
+
         # Step 1: 分块
         all_chunks = super().index_documents(documents)
-        print(f"Generated {len(all_chunks)} chunks")
 
-        # Step 2: 构建 chunk 向量索引
-        vectorstore = self.build_vectorstore(all_chunks)
+        # 为每个文档的 chunks 分配 chunk_id（基于文件内容的 hash）
+        # chunk_id 格式：{file_hash}_{chunk_index}
+        new_chunks = []
+
+        for doc in documents:
+            file_path = doc.metadata.get("source", "")
+            if not file_path or not os.path.exists(file_path):
+                # 非文件输入，用 source 字段做 hash
+                file_hash = hashlib.md5(doc.metadata.get("source", "unknown").encode()).hexdigest()[:16]
+            else:
+                # 计算文件内容的 hash
+                hasher = hashlib.md5()
+                with open(file_path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(8192), b''):
+                        hasher.update(chunk)
+                file_hash = hasher.hexdigest()[:16]
+
+            # 增量模式下跳过已处理的文件
+            if incremental and file_hash in existing_file_hashes:
+                print(f"  Skipping already processed file: {file_path}")
+                continue
+
+            # 获取该文档对应的 chunks（通过 source 匹配）
+            doc_chunks = [c for c in all_chunks if c.metadata.get("source") == file_path]
+            for idx, chunk in enumerate(doc_chunks):
+                chunk.metadata["chunk_id"] = f"{file_hash}_{idx}"
+                chunk.metadata["file_hash"] = file_hash
+                new_chunks.append(chunk)
+
+        all_chunks = new_chunks
+        print(f"Generated {len(all_chunks)} new chunks")
+
+        # 如果没有新 chunks，直接返回已有数据
+        if incremental and not all_chunks:
+            print("No new chunks to process. Loading existing index...")
+            vectorstore = self.load_vectorstore(os.path.join(database_path, 'vectorstore'))
+            self.graph_builder.storage_path = os.path.join(database_path, 'graph.pkl')
+            graph = self.graph_builder.graph
+            with open(os.path.join(database_path, 'entities.pkl'), 'rb') as f:
+                entity_index = pickle.load(f)["index"]
+            return all_chunks, vectorstore, graph, entity_index
+
+        # Step 2: 构建/更新 chunk 向量索引
+        if incremental and os.path.exists(os.path.join(database_path, 'vectorstore')):
+            # 增量模式：加载已有 vectorstore 并添加新 chunks
+            vectorstore = self.load_vectorstore(os.path.join(database_path, 'vectorstore'))
+            # FAISS 增量添加：重新构建（简化处理）
+            all_docs = list(vectorstore.docstore._dict.values()) + all_chunks
+            vectorstore = self.build_vectorstore(all_docs)
+        else:
+            vectorstore = self.build_vectorstore(all_chunks)
+
         vectorstore_path = os.path.join(database_path, 'vectorstore')
         self.save_vectorstore(vectorstore, vectorstore_path)
         print(f"Saved chunk vectorstore to {vectorstore_path}")
 
-        # Step 3: 构建图谱
-        graph = self.graph_builder.build_from_documents(all_chunks)
+        # Step 3: 构建/更新图谱
+        stats = self.graph_builder.build_from_documents(
+            all_chunks,
+            incremental=incremental
+        )
+        graph = self.graph_builder.graph
         print(f"Graph: {graph.number_of_nodes()} entities, {graph.number_of_edges()} relationships")
         graph_path = os.path.join(database_path, 'graph.pkl')
         self.save_graph(graph_path)

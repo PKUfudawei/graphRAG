@@ -7,12 +7,16 @@
 实体属性:
 - chunk_ids: 集合，记录实体来自哪些 chunk
 - type: 实体类型（最常用）
+
+增量更新:
+- incremental=True 时，加载已有图，只处理新增 chunks
+- 合并新实体/关系到已有图中
 """
 from collections import Counter, defaultdict
 import os
 import pickle
 import networkx as nx
-from typing import Optional
+from typing import Optional, Set
 
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
@@ -47,16 +51,28 @@ class GraphBuilder:
     @property
     def graph(self) -> nx.DiGraph:
         """Lazy load NetworkX graph."""
-        return self.built_graph if self.built_graph else self.load_graph()
+        return self.built_graph if self.built_graph else self._load_graph()
 
-    @staticmethod
-    def load_graph(self, path=None) -> nx.DiGraph:
+    def _load_graph(self, path: str = None) -> nx.DiGraph:
         """Load graph from pickle file."""
         path = path or self.storage_path
         if os.path.exists(path):
             with open(path, "rb") as f:
                 return pickle.load(f)
         return nx.DiGraph()
+
+    def _get_existing_file_hashes(self) -> Set[str]:
+        """获取图中已存在的所有 file_hash"""
+        graph = self._load_graph()
+        file_hashes = set()
+        for node, data in graph.nodes(data=True):
+            chunk_ids = data.get("chunk_ids", [])
+            for cid in chunk_ids:
+                if isinstance(cid, str) and "_" in cid:
+                    file_hashes.add(cid.split("_")[0])
+                elif isinstance(cid, str):
+                    file_hashes.add(cid)
+        return file_hashes
 
     def save_graph(self):
         """Save graph to pickle file."""
@@ -106,7 +122,11 @@ class GraphBuilder:
 
     # ==================== 对齐和建图阶段 ====================
 
-    def align_and_build(self, graph_docs: list[GraphDocument]) -> dict[str, int]:
+    def align_and_build(
+        self,
+        graph_docs: list[GraphDocument],
+        incremental: bool = False
+    ) -> dict[str, int]:
         """对提取的 GraphDocuments 进行消歧对齐，然后构建 NetworkX 图。
 
         流程:
@@ -117,10 +137,39 @@ class GraphBuilder:
 
         Args:
             graph_docs: extract_batch() 返回的 GraphDocument 列表。
+            incremental: 是否增量更新。True 时加载已有图并合并新数据。
 
         Returns:
             统计信息字典。
         """
+        # Step 0: 增量模式 - 加载已有图并过滤已处理的 chunks
+        existing_file_hashes: Set[str] = set()
+        if incremental:
+            print(f"\n[Incremental Mode] Loading existing graph...")
+            self.built_graph = self._load_graph()
+            existing_file_hashes = self._get_existing_file_hashes()
+            print(f"  Existing graph: {self.built_graph.number_of_nodes()} nodes, "
+                  f"{self.built_graph.number_of_edges()} edges")
+            print(f"  Existing file_hashes: {len(existing_file_hashes)}")
+
+            # 过滤掉已处理的 graph_docs
+            original_count = len(graph_docs)
+            graph_docs = [
+                gd for gd in graph_docs
+                if gd.source.metadata.get("file_hash", "") not in existing_file_hashes
+            ]
+            print(f"  New chunks to process: {len(graph_docs)}/{original_count}")
+
+            if not graph_docs:
+                print("  No new chunks. Skipping build.")
+                self.save_graph()
+                return {
+                    "entities": self.built_graph.number_of_nodes(),
+                    "relationships": self.built_graph.number_of_edges(),
+                    "alias_groups": 0,
+                    "skipped": original_count
+                }
+
         # Step 1: 收集所有实体和关系，记录 chunk_ids
         print("\n[Align Step 1] Collecting entities and relationships...")
 
@@ -130,7 +179,7 @@ class GraphBuilder:
         all_relationships = []
 
         for graph_doc in graph_docs:
-            chunk_id = int(graph_doc.source.metadata.get("chunk_id", -1))
+            chunk_id = graph_doc.source.metadata.get("chunk_id", "unknown_0")
             entity_source = graph_doc.source.metadata.get("source", "")
 
             for node in graph_doc.nodes:
@@ -153,11 +202,21 @@ class GraphBuilder:
 
         if not entity_names:
             print("No entities found.")
+            if incremental:
+                self.save_graph()
             return {"entities": 0, "relationships": 0, "alias_groups": 0}
 
         # Step 2: 用 embedding 找 alias
         print("\n[Align Step 2] Finding aliases using embedding similarity...")
-        alias_map = self.resolver.find_aliases(entity_names)
+
+        if incremental:
+            # 增量模式：合并已有实体名称一起进行消歧
+            existing_entities = list(self.built_graph.nodes())
+            all_entity_names = list(set(entity_names + existing_entities))
+            print(f"  Including {len(existing_entities)} existing entities for resolution")
+            alias_map = self.resolver.find_aliases(all_entity_names)
+        else:
+            alias_map = self.resolver.find_aliases(entity_names)
 
         # 构建 canonical 映射
         name_to_canonical = {name: alias_map.get(name, name) for name in entity_names}
@@ -170,9 +229,14 @@ class GraphBuilder:
 
         print(f"  Found {len(alias_groups)} alias groups")
 
-        # Step 3: 构建 NetworkX 图（使用 canonical 名称）
-        print("\n[Align Step 3] Building NetworkX graph...")
-        new_graph = nx.DiGraph()
+        # Step 3: 构建/更新 NetworkX 图（使用 canonical 名称）
+        print("\n[Align Step 3] Building/Updating NetworkX graph...")
+
+        if not incremental:
+            new_graph = nx.DiGraph()
+        else:
+            # 增量模式：在已有图上添加新数据
+            new_graph = self.built_graph
 
         # 添加节点（使用 canonical 名称，合并 chunk_ids）
         canonical_info: dict[str, dict] = defaultdict(lambda: {"chunk_ids": set(), "types": Counter()})
@@ -182,14 +246,27 @@ class GraphBuilder:
 
         for canonical, info in canonical_info.items():
             most_common_type = info["types"].most_common(1)[0][0]
-            new_graph.add_node(
-                canonical,
-                type=most_common_type,
-                chunk_ids=sorted(info["chunk_ids"])  # 转换为列表以便 pickle
-            )
+
+            if canonical in new_graph:
+                # 增量模式：更新已有节点
+                existing_chunk_ids = set(new_graph.nodes[canonical].get("chunk_ids", []))
+                new_graph.nodes[canonical]["chunk_ids"] = sorted(
+                    existing_chunk_ids.union(info["chunk_ids"])
+                )
+            else:
+                new_graph.add_node(
+                    canonical,
+                    type=most_common_type,
+                    chunk_ids=sorted(info["chunk_ids"])
+                )
 
         # 添加关系（使用 canonical 名称，去重）
         seen_edges = set()
+        if incremental:
+            # 保留已有边
+            for u, v, data in new_graph.edges(data=True):
+                seen_edges.add((u, v, data.get("rel_type", "RELATED_TO")))
+
         for rel in all_relationships:
             source_canonical = name_to_canonical.get(rel["source"], rel["source"])
             target_canonical = name_to_canonical.get(rel["target"], rel["target"])
@@ -208,30 +285,40 @@ class GraphBuilder:
                 rel_type=rel["rel_type"]
             )
 
-        # 赋值并持久化到磁盘
+        # 赋值（不自动保存，由调用者控制保存时机）
         self.built_graph = new_graph
-        self.save_graph()
 
         stats = self.stats()
-        print(f"\n[Build Complete] Graph built: {stats['num_nodes']} nodes, {stats['num_relationships']} relationships")
+        mode_str = "Incremental" if incremental else "Full"
+        print(f"\n[{mode_str} Build Complete] Graph: {stats['num_nodes']} nodes, "
+              f"{stats['num_relationships']} relationships")
 
-        return self.built_graph
+        return {
+            "entities": stats["num_nodes"],
+            "relationships": stats["num_relationships"],
+            "alias_groups": len(alias_groups)
+        }
 
     # ==================== 便捷方法：一站式提取 + 对齐 + 建图 ====================
 
-    def build_from_documents(self, documents: list[Document]) -> dict[str, int]:
+    def build_from_documents(
+        self,
+        documents: list[Document],
+        incremental: bool = False
+    ) -> dict[str, int]:
         """一站式从 documents 构建知识图谱。
 
         流程：extract_batch() -> align_and_build()
 
         Args:
             documents: 输入的 LangChain Document 列表（chunks）。
+            incremental: 是否增量更新。
 
         Returns:
             统计信息字典。
         """
         graph_docs = self.extract_batch(documents)
-        return self.align_and_build(graph_docs)
+        return self.align_and_build(graph_docs, incremental=incremental)
 
 
 def get_graph_builder(

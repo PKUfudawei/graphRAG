@@ -29,8 +29,9 @@ def parse_arguments():
     parser.add_argument("-b", "--build", type=str, help="构建索引：指定文件路径或 glob 模式")
     parser.add_argument("-q", "--query", type=str, help="单次查询")
     parser.add_argument("-i", "--interact", action="store_true", help="交互模式")
-    parser.add_argument("-s", "--storage", type=str, default="./database/graphrag_index",
+    parser.add_argument("-s", "--storage", type=str, default="./storage/graphrag_index",
                         help="索引存储路径")
+    parser.add_argument("--incremental", action="store_true", help="增量更新模式")
     parser.add_argument("--chunk_size", type=int, default=512)
     parser.add_argument("--overlap", type=int, default=50)
     parser.add_argument("--top_k_vectors", type=int, default=5)
@@ -49,10 +50,12 @@ def parse_arguments():
 def build_index(
     files,
     storage_path: str,
-    max_workers: int = 16
+    max_workers: int = 16,
+    incremental: bool = False
 ) -> None:
     """构建 GraphRAG 索引（向量 + 图谱 + 实体 embedding）"""
-    print(f"Building GraphRAG index from {len(files)} files...")
+    mode_str = "Incremental update" if incremental else "Full build"
+    print(f"{mode_str} from {len(files)} files...")
 
     # 读取文件并创建 Document 对象
     documents = []
@@ -66,10 +69,14 @@ def build_index(
 
     # 使用 GraphRAGIndexer 的一站式索引方法
     indexer = get_graphrag_indexer(max_workers=max_workers)
-    chunks, vectorstore, graph, entity_index = indexer.index_documents(documents, database_path=storage_path)
+    chunks, vectorstore, graph, entity_index = indexer.index_documents(
+        documents,
+        database_path=storage_path,
+        incremental=incremental
+    )
 
     print("\n" + "=" * 60)
-    print("Index built successfully!")
+    print(f"Index {mode_str.lower()} successfully!")
     print(f"  Chunks: {len(chunks)}")
     print(f"  Entities: {graph.number_of_nodes()}")
     print(f"  Relationships: {graph.number_of_edges()}")
@@ -97,9 +104,11 @@ def load_index(storage_path: str):
     if not os.path.exists(vectorstore_path):
         raise FileNotFoundError(f"Vectorstore not found at {vectorstore_path}")
     embedding = get_embedding()
+    # FAISS 需要 Embeddings 对象，使用 embedding.embed_model
+    embed_model = embedding.embed_model if hasattr(embedding, 'embed_model') else embedding
     vectorstore = FAISS.load_local(
         vectorstore_path,
-        embedding,
+        embed_model,
         allow_dangerous_deserialization=True
     )
 
@@ -173,7 +182,8 @@ def main():
         build_index(
             files,
             args.storage,
-            args.max_workers
+            args.max_workers,
+            args.incremental
         )
         return
 

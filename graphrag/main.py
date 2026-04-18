@@ -42,6 +42,7 @@ def parse_arguments():
     parser.add_argument("--graph_weight", type=float, default=0.5)
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-m3")
     parser.add_argument("--max_workers", type=int, default=16, help="并行提取的最大工作线程数")
+    parser.add_argument("--enable_thinking", type=str, default="true", help="是否启用 thinking 模式 (true/false，默认 true)")
 
     args = parser.parse_args()
     return args, parser
@@ -51,11 +52,13 @@ def build_index(
     files,
     storage_path: str,
     max_workers: int = 16,
-    incremental: bool = False
+    incremental: bool = False,
+    enable_thinking: bool = False
 ) -> None:
     """构建 GraphRAG 索引（向量 + 图谱 + 实体 embedding）"""
     mode_str = "Incremental update" if incremental else "Full build"
     print(f"{mode_str} from {len(files)} files...")
+    print(f"enable_thinking: {enable_thinking}")
 
     # 读取文件并创建 Document 对象
     documents = []
@@ -68,7 +71,7 @@ def build_index(
         ))
 
     # 使用 GraphRAGIndexer 的一站式索引方法
-    indexer = get_graphrag_indexer(max_workers=max_workers)
+    indexer = get_graphrag_indexer(max_workers=max_workers, enable_thinking=enable_thinking)
     chunks, vectorstore, graph, entity_index = indexer.index_documents(
         documents,
         database_path=storage_path,
@@ -179,11 +182,13 @@ def main():
         if not files:
             print(f"Error: No files matched '{args.build}'")
             return
+        enable_thinking = args.enable_thinking.lower() == "true"
         build_index(
             files,
             args.storage,
             args.max_workers,
-            args.incremental
+            args.incremental,
+            enable_thinking
         )
         return
 

@@ -185,7 +185,7 @@ All source and target in relationships must exist in entities."""),
                 results.append(future.result())
 
         # 按原始顺序返回
-        results.sort(key=lambda r: r.source.metadata.get("chunk_id", 0))
+        #results.sort(key=lambda r: r.source.metadata.get("chunk_id", 0))
         return results
 
     async def _extract_batch_async(self, documents: List[Document]) -> List[GraphDocument]:

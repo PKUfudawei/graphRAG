@@ -29,12 +29,22 @@ class GraphRAGIndexer(Indexer):
         embedding=None,
         graph_builder=None,
         max_workers: int = 16,
+        enable_thinking: bool = True,
     ):
         super().__init__(
-            chunker=chunker, embedding=embedding, 
+            chunker=chunker, embedding=embedding,
         )
-        self.graph_builder = graph_builder or get_graph_builder()
+        self.enable_thinking = enable_thinking
         self.max_workers = max_workers
+        # 创建带有 enable_thinking 参数的 graph_builder
+        if graph_builder is None:
+            from models.llm import get_llm
+            from graphrag.graph.extractor import get_extractor
+            llm = get_llm(enable_thinking=enable_thinking)
+            extractor = get_extractor(llm=llm, max_workers=max_workers)
+            self.graph_builder = get_graph_builder(extractor=extractor, max_workers=max_workers)
+        else:
+            self.graph_builder = graph_builder
 
     def build_vectorstore(self, documents):
         return super().build_vectorstore(documents)
@@ -226,6 +236,7 @@ def get_graphrag_indexer(
     chunker=None,
     embedding=None,
     max_workers: int = 16,
+    enable_thinking: bool = True,
 ) -> GraphRAGIndexer:
     """获取 GraphRAG 索引器实例
 
@@ -233,6 +244,7 @@ def get_graphrag_indexer(
         chunker: 预创建的 chunker 实例
         embedding: 预创建的 Embeddings 实例
         max_workers: 并行提取的最大工作线程数
+        enable_thinking: 是否启用 LLM thinking 模式（默认 True）
 
     Returns:
         GraphRAGIndexer 实例
@@ -241,6 +253,7 @@ def get_graphrag_indexer(
         chunker=chunker,
         embedding=embedding,
         max_workers=max_workers,
+        enable_thinking=enable_thinking,
     )
 
 

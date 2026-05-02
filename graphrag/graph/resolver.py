@@ -6,6 +6,7 @@ from typing import Dict, List
 
 import faiss
 import numpy as np
+from tqdm import tqdm
 
 # Add project root to path for models import
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,7 +43,8 @@ class Resolver:
         freq = Counter(entity_names)
         unique_names = list(freq.keys())
 
-        embeddings = self.embed_model.encode(unique_names)
+        print(f"[Resolver] Generating embeddings for {len(unique_names)} unique entities...")
+        embeddings = self.embed_model.encode(list(tqdm(unique_names, desc="  Embedding")))
         faiss.normalize_L2(embeddings)
 
         dimension = embeddings.shape[1]
@@ -51,6 +53,7 @@ class Resolver:
         index.hnsw.efSearch = 50
         index.add(embeddings)
 
+        print(f"[Resolver] Clustering similar entities...")
         alias_map = self._cluster_similar_entities(index, embeddings, unique_names, freq)
         return alias_map
 

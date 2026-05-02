@@ -89,7 +89,11 @@ class Chunker(TokenTextSplitter):
         self, documents: List[Document], **kwargs
     ) -> List[Document]:
         """
-        先截断文档再分块
+        先截断文档再分块，并为每个 chunk 添加 metadata:
+        - chunk_id: "{file_hash}_{chunk_index}" 格式
+        - file_hash: 基于 page_content 的 md5 hash（前 16 位）
+        - source: 原文档的 source 字段
+        - 保留原文档的所有 metadata（如 book_title, authors, context_id 等）
 
         Args:
             documents: 原始文档列表
@@ -97,15 +101,28 @@ class Chunker(TokenTextSplitter):
         Returns:
             分块后的文档列表
         """
-        texts, metadatas = [], []
-        for doc in tqdm(documents, desc='Truncating documents'):
+        import hashlib
+
+        all_chunks = []
+
+        for doc in tqdm(documents, desc='Chunking documents'):
+            # 截断文本
             truncated_text = self.truncate(doc.page_content)
-            texts.append(truncated_text)
-            metadatas.append(doc.metadata)
-        chunks = self.create_documents(texts, metadatas=metadatas)
-        for idx, chunk in enumerate(chunks):
-            chunk.metadata['chunk_id'] = idx
-        return chunks
+
+            # 计算 file_hash（基于 page_content，更可靠）
+            file_hash = hashlib.md5(doc.page_content.encode()).hexdigest()[:16]
+
+            # 分块（create_documents 会保留原始 metadata）
+            doc_chunks = self.create_documents([truncated_text], metadatas=[doc.metadata])
+
+            # 为每个 chunk 添加 chunk_id 和 file_hash
+            for idx, chunk in enumerate(doc_chunks):
+                chunk.metadata["chunk_id"] = f"{file_hash}_{idx}"
+                chunk.metadata["file_hash"] = file_hash
+                all_chunks.append(chunk)
+
+        print(f"Generated {len(all_chunks)} chunks from {len(documents)} documents")
+        return all_chunks
 
 
 def get_chunker(

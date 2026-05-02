@@ -1,5 +1,6 @@
 """Executor Agent - 任务执行"""
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -53,8 +54,7 @@ class Executor:
     def __init__(
         self,
         max_parallel_workers: int = 4,
-        max_retries: int = 1,
-        enable_fallback: bool = True
+        max_retries: int = 1
     ):
         """
         初始化 Executor
@@ -62,11 +62,10 @@ class Executor:
         Args:
             max_parallel_workers: 最大并行工作线程数
             max_retries: 最大重试次数
-            enable_fallback: 是否启用降级策略（graphrag -> rag）
         """
         self.max_parallel_workers = max_parallel_workers
         self.max_retries = max_retries
-        self.enable_fallback = enable_fallback
+        self._merge_lock = threading.Lock()  # 保护证据链合并操作
 
     def execute(self, plan: Plan) -> ExecutorResult:
         """
@@ -163,7 +162,7 @@ class Executor:
                 logger.warning(f"任务 {task.task_id} 执行异常 (重试 {retry}): {e}")
 
             # 如果不是最后一次重试，尝试降级
-            if retry < self.max_retries and self.enable_fallback:
+            if retry < self.max_retries:
                 if self._try_fallback(task, evidence_chain, last_error):
                     # 降级成功，重新执行
                     continue
@@ -181,12 +180,10 @@ class Executor:
 
     def _execute_task_with_tool(self, task: Task, evidence_chain: EvidenceChain) -> TaskExecutionResult:
         """使用指定工具执行任务"""
-        # 获取工具
-        tool_class = ToolRegistry.get_tool(task.task_type.value)
-        if not tool_class:
+        # 获取工具（使用 ToolRegistry 的 create_tool 方法）
+        tool = ToolRegistry.create_tool(task.task_type.value)
+        if not tool:
             raise ValueError(f"未找到工具：{task.task_type.value}")
-
-        tool = tool_class()
 
         # 执行搜索
         payload = {"query": task.query, **task.parameters}
@@ -233,20 +230,16 @@ class Executor:
         Returns:
             是否降级成功（True 表示已降级，需要重新执行）
         """
-        # graphrag -> rag 降级
-        if task.task_type == TaskType.GRAPH_RAG:
-            logger.info(f"任务 {task.task_id} 尝试降级：graphrag -> rag")
-            task.task_type = TaskType.RAG
-            evidence_chain.add_reasoning_step(
-                f"任务 {task.task_id} 降级：graphrag 失败 ({error})，使用 rag 替代"
-            )
-            return True
-
+        # 当前无降级策略
         return False
 
     def execute_parallel(self, plan: Plan) -> ExecutorResult:
         """
         并行执行计划（依赖感知的并行）
+
+        线程安全实现：
+        - 每个任务使用独立的 EvidenceChain，避免竞态条件
+        - 使用锁保护主证据链的合并操作
 
         Args:
             plan: 任务计划
@@ -254,7 +247,8 @@ class Executor:
         Returns:
             ExecutorResult 对象
         """
-        evidence_chain = EvidenceChain(
+        # 主证据链（用于最终合并）
+        main_evidence_chain = EvidenceChain(
             chain_id=plan.plan_id.replace("plan_", "chain_"),
             query=plan.original_query
         )
@@ -283,10 +277,18 @@ class Executor:
                 logger.warning("没有可执行的任务，剩余任务跳过")
                 break
 
-            # 并行执行就绪任务
+            # 并行执行就绪任务（线程安全版本）
             with ThreadPoolExecutor(max_workers=self.max_parallel_workers) as executor:
+                # 每个任务使用独立的 EvidenceChain
                 futures = {
-                    executor.submit(self._execute_single_task, task, evidence_chain): task
+                    executor.submit(
+                        self._execute_single_task,
+                        task,
+                        EvidenceChain.empty(
+                            chain_id=f"chain_{task.task_id}",
+                            query=task.query
+                        )
+                    ): task
                     for task in ready_tasks
                 }
 
@@ -296,12 +298,21 @@ class Executor:
                     completed_tasks[result.task.task_id] = result
                     pending_tasks.discard(result.task.task_id)
 
+                    # 线程安全地合并证据链
+                    with self._merge_lock:
+                        # 从 result 中提取证据并合并到主证据链
+                        for evidence in result.evidence:
+                            main_evidence_chain.add_evidence(evidence)
+                        main_evidence_chain.add_reasoning_step(
+                            f"执行任务 {result.task.task_id} ({result.task.task_type.value}): {result.task.query}"
+                        )
+
                     # 更新任务状态
                     task_map[result.task.task_id].status = (
                         TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
                     )
 
-        return ExecutorResult(evidence_chain=evidence_chain, task_results=task_results)
+        return ExecutorResult(evidence_chain=main_evidence_chain, task_results=task_results)
 
 
 def get_executor(max_parallel_workers: int = 4) -> Executor:

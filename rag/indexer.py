@@ -44,19 +44,37 @@ class Indexer:
         self.chunker = chunker or get_chunker()
         self.embedding = embedding or get_embedding()
 
-    def index_documents(self, documents: List[Document]) -> List[Document]:
+    def index_documents(
+        self,
+        documents: List[Document],
+        output_path: str = None
+    ) -> tuple:
         """
-        索引文档列表（分块 + 添加 chunk_id）
+        一站式索引文档：分块 + 构建向量索引 + 保存
+
+        返回 (chunks, vectorstore) 元组。
 
         Args:
             documents: langchain Document 列表
+            output_path: 向量索引保存路径（可选，不传则只返回 chunks 和 vectorstore 对象）
 
         Returns:
-            分块后的文档列表（每个 chunk 的 metadata 中包含 chunk_id）
+            (chunks, vectorstore) 元组
         """
-        # 使用 split_documents 方法，它会自动添加 chunk_id
-        all_chunks = self.chunker.split_documents(documents)
-        return all_chunks
+        # Step 1: 分块
+        print(f"[Indexer] Chunking {len(documents)} documents...")
+        chunks = self.chunker.split_documents(documents)
+        print(f"  Generated {len(chunks)} chunks")
+
+        # Step 2: 构建向量索引（带进度条）
+        print(f"[Indexer] Building vectorstore...")
+        vectorstore = self.build_vectorstore(chunks)
+
+        # Step 3: 保存（如果指定了路径）
+        if output_path:
+            self.save_vectorstore(vectorstore, output_path)
+
+        return chunks, vectorstore
 
     def build_vectorstore(self, documents: List[Document]) -> FAISS:
         """
@@ -68,12 +86,12 @@ class Indexer:
         Returns:
             FAISS 向量存储实例
         """
+        # 直接使用 FAISS.from_documents，它会自动调用 embedding.embed_documents
         embed_model = self.embedding.embed_model if hasattr(self.embedding, 'embed_model') else self.embedding
         return FAISS.from_documents(documents, embed_model)
 
-    def save_vectorstore(self, vectorstore: FAISS, path: str=None):
+    def save_vectorstore(self, vectorstore: FAISS, path: str):
         """保存向量存储"""
-        path = path or self.vectorstore_path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         vectorstore.save_local(path)
         print(f"Vectorstore saved to {path}")
@@ -129,41 +147,13 @@ if __name__ == "__main__":
     # 将 texts 转换为 Document 对象用于测试
     documents = [Document(page_content=t, metadata={"source": f"doc_{i}"}) for i, t in enumerate(texts)]
 
-    # 测试 1: 默认 truncations=['acknowledgement', 'acknowledgment']
+    # 测试：index_documents 返回 (chunks, vectorstore)
     print("=" * 60)
-    print("Test 1:")
+    print("Test: index_documents")
     chunker = get_chunker(chunk_size=100, overlap=20, truncations=['acknowledgement', 'acknowledgment'])
-    indexer1 = get_indexer(chunker=chunker)
-    result1 = indexer1.index_documents(documents)
-    for i, doc in enumerate(result1):
-        print(f"- Chunk {i}: {doc.page_content.strip()}")
-
-    # 测试 2: truncations=[] (禁用)
-    print()
-    print("=" * 60)
-    print("Test 2:")
-    chunker = get_chunker(chunk_size=100, overlap=20, truncations=None)
-    indexer2 = get_indexer(chunker=chunker)
-    result2 = indexer2.index_documents(documents)
-    for i, doc in enumerate(result2):
-        print(f"- Chunk {i}: {doc.page_content.strip()}")
-
-    # 测试 3: 自定义 truncations=['topic']
-    print()
-    print("=" * 60)
-    print("Test 3:")
-    chunker = get_chunker(chunk_size=100, overlap=20, truncations=['topic'])
-    indexer3 = get_indexer(chunker=chunker)
-    result3 = indexer3.index_documents(documents)
-    for i, doc in enumerate(result3):
-        print(f"- Chunk {i}: {doc.page_content.strip()}")
-
-    # 测试 4: 自定义 truncations=['acknowledgement']
-    print()
-    print("=" * 60)
-    print("Test 4:")
-    chunker = get_chunker(chunk_size=100, overlap=20, truncations=['acknowledgment'])
-    indexer4 = get_indexer(chunker=chunker)
-    result4 = indexer4.index_documents(documents)
-    for i, doc in enumerate(result4):
-        print(f"- Chunk {i}: {doc.page_content.strip()}")
+    indexer = get_indexer(chunker=chunker)
+    chunks, vectorstore = indexer.index_documents(documents)
+    print(f"Generated {len(chunks)} chunks")
+    print(f"Vectorstore size: {vectorstore.index.ntotal}")
+    for i, doc in enumerate(chunks[:3]):
+        print(f"- Chunk {i}: {doc.page_content.strip()[:100]}...")

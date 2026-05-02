@@ -212,5 +212,7 @@ data*/
 storage/
 .omc/
 .claude/
-
+benchmarks/
+test*/
+test*
 *.pkl

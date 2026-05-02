@@ -8,13 +8,15 @@ from .base import BaseTool, ToolResult
 
 
 class GraphRAGTool(BaseTool):
-    """GraphRAG 检索工具"""
+    """GraphRAG 检索工具 - 支持 naive_search, local_search, global_search"""
 
     def __init__(self, storage_path: str = "./storage/graphrag_index"):
         self.storage_path = storage_path
         self._graph = None
         self._entity_index = None
         self._entity_metadata = None
+        self._relationship_index = None
+        self._relationship_metadata = None
         self._vectorstore = None
         self._embedding = None
         self._initialized = False
@@ -44,13 +46,20 @@ class GraphRAGTool(BaseTool):
         self._entity_index = entities_data["index"]
         self._entity_metadata = entities_data["metadata"]
 
-        # 加载 vectorstore
-        self._embedding = get_embedding()
-        embed_model = self._embedding.embed_model if hasattr(self._embedding, 'embed_model') else self._embedding
+        # 加载 relationships
+        relationships_path = os.path.join(self.storage_path, 'relationships.pkl')
+        with open(relationships_path, "rb") as f:
+            relationships_data = pickle.load(f)
+        self._relationship_index = relationships_data["index"]
+        self._relationship_metadata = relationships_data["metadata"]
+
+        # 加载 vectorstore - 使用 CPU 设备
+        self._embedding = get_embedding(model="BAAI/bge-m3", device="cpu")
+        embed_model = self._embedding.embed_model
         self._vectorstore = FAISS.load_local(
             os.path.join(self.storage_path, 'vectorstore'),
-            embed_model,
-            allow_dangerous_deserialization=True
+            embeddings=embed_model,
+            allow_dangerous_deserialization=True,
         )
 
         self._initialized = True
@@ -58,13 +67,10 @@ class GraphRAGTool(BaseTool):
     def get_name(self) -> str:
         return "graphrag"
 
-    def search(self, query: str, top_k_vectors: int = 5, top_k_entities: int = 3,
-               max_hops: int = 2, max_neighbors: int = 5, **kwargs) -> ToolResult:
-        """执行 GraphRAG 检索"""
+    def naive_search(self, query: str, top_k: int = 5, **kwargs) -> ToolResult:
+        """朴素检索：纯向量检索"""
         try:
             self._initialize()
-
-            # 创建 retriever
             from graphrag.retriever import get_graphrag_retriever
             retriever = get_graphrag_retriever(
                 graph=self._graph,
@@ -73,65 +79,102 @@ class GraphRAGTool(BaseTool):
                 embedding=self._embedding,
                 vectorstore=self._vectorstore
             )
+            docs = retriever.naive_search(query=query, top_k=top_k)
+            return self._docs_to_tool_result(docs, "naive")
+        except Exception as e:
+            return ToolResult(success=False, answer="", evidence=[], error=str(e))
 
-            # 执行检索
-            docs = retriever.retrieve(
+    def local_search(self, query: str, top_k_entities: int = 3,
+                     max_hops: int = 1, max_neighbors: int = 3, **kwargs) -> ToolResult:
+        """局部检索：实体检索 + 单跳遍历，适合精确问答"""
+        try:
+            self._initialize()
+            from graphrag.retriever import get_graphrag_retriever
+            retriever = get_graphrag_retriever(
+                graph=self._graph,
+                entity_index=self._entity_index,
+                entity_metadata=self._entity_metadata,
+                embedding=self._embedding,
+                vectorstore=self._vectorstore
+            )
+            docs = retriever.local_search(
                 query=query,
-                top_k_vectors=top_k_vectors,
                 top_k_entities=top_k_entities,
                 max_hops=max_hops,
                 max_neighbors=max_neighbors
             )
-
-            # 转换为证据列表
-            evidence = []
-            answer_parts = []
-            for i, doc in enumerate(docs):
-                retrieval_type = doc.metadata.get("retrieval_type", "unknown")
-                score = doc.metadata.get("score", 0.0)
-
-                evidence_item = {
-                    "content": doc.page_content,
-                    "source": doc.metadata.get("source", "unknown"),
-                    "retrieval_type": retrieval_type,
-                    "score": score,
-                    "metadata": doc.metadata
-                }
-                evidence.append(evidence_item)
-
-                type_str = "图谱" if retrieval_type == "graph" else "向量"
-                answer_parts.append(f"[{type_str} 结果 {i+1}]: {doc.page_content}")
-
-            answer = "\n\n".join(answer_parts) if answer_parts else "未找到相关信息"
-
-            return ToolResult(
-                success=True,
-                answer=answer,
-                evidence=evidence
-            )
+            return self._docs_to_tool_result(docs, "local")
         except Exception as e:
-            return ToolResult(
-                success=False,
-                answer="",
-                evidence=[],
-                error=str(e)
+            return ToolResult(success=False, answer="", evidence=[], error=str(e))
+
+    def global_search(self, query: str, top_k_vectors: int = 5, top_k_relationships: int = 10,
+                      **kwargs) -> ToolResult:
+        """全局检索：向量检索 + 关系检索（无往外跳），适合综合问题"""
+        try:
+            self._initialize()
+            from graphrag.retriever import get_graphrag_retriever
+            retriever = get_graphrag_retriever(
+                graph=self._graph,
+                entity_index=self._entity_index,
+                entity_metadata=self._entity_metadata,
+                relationship_index=self._relationship_index,
+                relationship_metadata=self._relationship_metadata,
+                embedding=self._embedding,
+                vectorstore=self._vectorstore
             )
+            docs = retriever.global_search(
+                query=query,
+                top_k_vectors=top_k_vectors,
+                top_k_relationships=top_k_relationships
+            )
+            return self._docs_to_tool_result(docs, "global")
+        except Exception as e:
+            return ToolResult(success=False, answer="", evidence=[], error=str(e))
+
+    def search(self, query: str, mode: str = "global", **kwargs) -> ToolResult:
+        """执行 GraphRAG 检索（统一入口）
+
+        Args:
+            query: 查询文本
+            mode: 检索模式 (naive/local/global)
+            **kwargs: 各模式的额外参数
+        """
+        try:
+            if mode == "naive":
+                return self.naive_search(query, **kwargs)
+            elif mode == "local":
+                return self.local_search(query, **kwargs)
+            else:  # global
+                return self.global_search(query, **kwargs)
+        except Exception as e:
+            return ToolResult(success=False, answer="", evidence=[], error=str(e))
+
+    def _docs_to_tool_result(self, docs: list, mode: str) -> ToolResult:
+        """将 Document 列表转换为 ToolResult"""
+        evidence = []
+        answer_parts = []
+        for i, doc in enumerate(docs):
+            retrieval_type = doc.metadata.get("retrieval_type", "unknown")
+            score = doc.metadata.get("score", 0.0)
+            evidence_item = {
+                "content": doc.page_content,
+                "source": doc.metadata.get("source", "unknown"),
+                "retrieval_type": retrieval_type,
+                "score": score,
+                "metadata": doc.metadata
+            }
+            evidence.append(evidence_item)
+            type_str = {"naive": "向量", "local": "局部图谱", "global": "全局"}.get(mode, "结果")
+            answer_parts.append(f"[{type_str} 结果 {i+1}]: {doc.page_content}")
+        answer = "\n\n".join(answer_parts) if answer_parts else "未找到相关信息"
+        return ToolResult(success=True, answer=answer, evidence=evidence)
 
     def structured_search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """结构化搜索接口（用于 Executor）"""
         query = payload.get("query", "")
-        top_k_vectors = payload.get("top_k_vectors", 5)
-        top_k_entities = payload.get("top_k_entities", 3)
-        max_hops = payload.get("max_hops", 2)
-        max_neighbors = payload.get("max_neighbors", 5)
+        mode = payload.get("mode", "global")  # naive/local/global
 
-        result = self.search(
-            query=query,
-            top_k_vectors=top_k_vectors,
-            top_k_entities=top_k_entities,
-            max_hops=max_hops,
-            max_neighbors=max_neighbors
-        )
+        result = self.search(query=query, mode=mode, **payload)
 
         return {
             "success": result.success,

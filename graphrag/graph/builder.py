@@ -1,12 +1,19 @@
 """Graph builder for building knowledge graph from documents using NetworkX.
 
-工作流程:
+工作流程 (LightRAG 风格):
 1. extract_batch(): 并行提取所有 chunks 的实体和关系（不建图）
 2. align_and_build(): 消歧对齐后构建 NetworkX 图
 
 实体属性:
-- chunk_ids: 集合，记录实体来自哪些 chunk
-- type: 实体类型（最常用）
+- description: 实体描述（来自 entity_description）
+- type: 实体类型
+- chunk_ids: 列表，记录实体来自哪些 chunk
+
+关系属性:
+- description: 关系描述（来自 relationship_description）
+- keywords: 高层关键词（来自 relationship_keywords）
+- weight: 关系权重
+- chunk_ids: 列表，记录关系来自哪些 chunk
 
 增量更新:
 - incremental=True 时，加载已有图，只处理新增 chunks
@@ -17,12 +24,14 @@ import os
 import pickle
 import networkx as nx
 from typing import Optional, Set
+from tqdm import tqdm
 
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 
 from .extractor import get_extractor
 from .resolver import get_resolver
+
 
 
 class GraphBuilder:
@@ -41,9 +50,11 @@ class GraphBuilder:
         resolver=None,
         max_workers: int = 16,
         storage_path: str = "graph.pkl",
+        extract_mode: str = "thread",
     ):
         self.max_workers = max_workers
         self.storage_path = storage_path
+        self.extract_mode = extract_mode
         self.extractor = extractor or get_extractor()
         self.resolver = resolver or get_resolver()
         self.built_graph = None
@@ -170,15 +181,17 @@ class GraphBuilder:
                     "skipped": original_count
                 }
 
-        # Step 1: 收集所有实体和关系，记录 chunk_ids
+        # Step 1: 收集所有实体和关系，记录 chunk_ids (LightRAG 风格)
         print("\n[Align Step 1] Collecting entities and relationships...")
 
-        # entity_name -> {chunk_ids: set, types: Counter}
-        entity_info: dict[str, dict] = defaultdict(lambda: {"source": set(), "chunk_ids": set(), "types": Counter()})
-        # 收集所有关系 (source, target, rel_type, chunk_id)
+        # entity_name -> {chunk_ids: set, types: Counter, descriptions: list, sources: set}
+        entity_info: dict[str, dict] = defaultdict(
+            lambda: {"source": set(), "chunk_ids": set(), "types": Counter(), "descriptions": []}
+        )
+        # 收集所有关系 (source, target, rel_type, keywords, description, weight, chunk_id)
         all_relationships = []
 
-        for graph_doc in graph_docs:
+        for graph_doc in tqdm(graph_docs, desc="  Processing"):
             chunk_id = graph_doc.source.metadata.get("chunk_id", "unknown_0")
             entity_source = graph_doc.source.metadata.get("source", "")
 
@@ -186,14 +199,23 @@ class GraphBuilder:
                 entity_info[node.id]["source"].add(entity_source)
                 entity_info[node.id]["chunk_ids"].add(chunk_id)
                 entity_info[node.id]["types"][node.type] += 1
+                # 收集描述用于合并 (from properties)
+                node_desc = node.properties.get("description", "") if hasattr(node, "properties") else ""
+                if node_desc:
+                    entity_info[node.id]["descriptions"].append(node_desc)
 
             for rel in graph_doc.relationships:
                 source_id = rel.source.id
                 target_id = rel.target.id
+                # 从 properties 中获取关系属性
+                rel_props = rel.properties if hasattr(rel, "properties") else {}
                 all_relationships.append({
                     "source": source_id,
                     "target": target_id,
                     "rel_type": rel.type,
+                    "keywords": rel_props.get("keywords", ""),
+                    "description": rel_props.get("description", ""),
+                    "weight": rel_props.get("weight", 1.0),
                     "chunk_id": chunk_id
                 })
 
@@ -238,14 +260,20 @@ class GraphBuilder:
             # 增量模式：在已有图上添加新数据
             new_graph = self.built_graph
 
-        # 添加节点（使用 canonical 名称，合并 chunk_ids）
-        canonical_info: dict[str, dict] = defaultdict(lambda: {"chunk_ids": set(), "types": Counter()})
+        # 添加节点（使用 canonical 名称，合并 chunk_ids 和 descriptions）
+        canonical_info: dict[str, dict] = defaultdict(
+            lambda: {"chunk_ids": set(), "types": Counter(), "descriptions": []}
+        )
         for name, canonical in name_to_canonical.items():
             canonical_info[canonical]["chunk_ids"].update(entity_info[name]["chunk_ids"])
             canonical_info[canonical]["types"].update(entity_info[name]["types"])
+            canonical_info[canonical]["descriptions"].extend(entity_info[name].get("descriptions", []))
 
         for canonical, info in canonical_info.items():
             most_common_type = info["types"].most_common(1)[0][0]
+            # 合并描述（LightRAG 风格：用分隔符合并所有描述）
+            all_descriptions = info.get("descriptions", [])
+            description = " ".join(list(dict.fromkeys(all_descriptions))) if all_descriptions else ""
 
             if canonical in new_graph:
                 # 增量模式：更新已有节点
@@ -253,19 +281,32 @@ class GraphBuilder:
                 new_graph.nodes[canonical]["chunk_ids"] = sorted(
                     existing_chunk_ids.union(info["chunk_ids"])
                 )
+                # 合并描述
+                existing_desc = new_graph.nodes[canonical].get("description", "")
+                if existing_desc and description and existing_desc != description:
+                    new_graph.nodes[canonical]["description"] = existing_desc + " " + description
             else:
                 new_graph.add_node(
                     canonical,
                     type=most_common_type,
+                    description=description,
                     chunk_ids=sorted(info["chunk_ids"])
                 )
 
-        # 添加关系（使用 canonical 名称，去重）
-        seen_edges = set()
+        # 添加关系（使用 canonical 名称，统计 weight 和 chunk_ids，LightRAG 风格）
+        # edge_key -> {weight: float, chunk_ids: set, descriptions: list, keywords: list}
+        edge_info: dict[tuple, dict] = {}
+
         if incremental:
-            # 保留已有边
+            # 保留已有边的信息
             for u, v, data in new_graph.edges(data=True):
-                seen_edges.add((u, v, data.get("rel_type", "RELATED_TO")))
+                edge_key = (u, v, data.get("rel_type", "RELATED_TO"))
+                edge_info[edge_key] = {
+                    "weight": data.get("weight", 1.0),
+                    "chunk_ids": set(data.get("chunk_ids", [])),
+                    "descriptions": [data.get("description", "")] if data.get("description") else [],
+                    "keywords": [data.get("keywords", "")] if data.get("keywords") else []
+                }
 
         for rel in all_relationships:
             source_canonical = name_to_canonical.get(rel["source"], rel["source"])
@@ -275,15 +316,44 @@ class GraphBuilder:
                 continue
 
             edge_key = (source_canonical, target_canonical, rel["rel_type"])
-            if edge_key in seen_edges:
-                continue
-            seen_edges.add(edge_key)
+            chunk_id = rel["chunk_id"]
 
-            new_graph.add_edge(
-                source_canonical,
-                target_canonical,
-                rel_type=rel["rel_type"]
-            )
+            if edge_key not in edge_info:
+                edge_info[edge_key] = {"weight": 0.0, "chunk_ids": set(), "descriptions": [], "keywords": []}
+
+            edge_info[edge_key]["weight"] += rel.get("weight", 1.0)
+            edge_info[edge_key]["chunk_ids"].add(chunk_id)
+            if rel.get("description"):
+                edge_info[edge_key]["descriptions"].append(rel["description"])
+            if rel.get("keywords"):
+                edge_info[edge_key]["keywords"].append(rel["keywords"])
+
+        # 写入边（包含 weight、chunk_ids、description、keywords，LightRAG 风格）
+        for edge_key, info in edge_info.items():
+            source, target, rel_type = edge_key
+            weight = info["weight"]
+            chunk_ids = sorted(info["chunk_ids"])
+            # 合并描述和关键词
+            description = " ".join(list(dict.fromkeys(info["descriptions"])))
+            keywords = ", ".join(list(dict.fromkeys(info["keywords"])))
+
+            if new_graph.has_edge(source, target):
+                # 更新已有边的属性
+                new_graph.edges[source, target]["rel_type"] = rel_type
+                new_graph.edges[source, target]["weight"] = weight
+                new_graph.edges[source, target]["chunk_ids"] = chunk_ids
+                new_graph.edges[source, target]["description"] = description
+                new_graph.edges[source, target]["keywords"] = keywords
+            else:
+                new_graph.add_edge(
+                    source,
+                    target,
+                    rel_type=rel_type,
+                    weight=weight,
+                    chunk_ids=chunk_ids,
+                    description=description,
+                    keywords=keywords
+                )
 
         # 赋值（不自动保存，由调用者控制保存时机）
         self.built_graph = new_graph
@@ -317,7 +387,7 @@ class GraphBuilder:
         Returns:
             统计信息字典。
         """
-        graph_docs = self.extract_batch(documents)
+        graph_docs = self.extract_batch(documents, mode=self.extract_mode)
         return self.align_and_build(graph_docs, incremental=incremental)
 
 
@@ -326,6 +396,7 @@ def get_graph_builder(
     resolver=None,
     max_workers=16,
     storage_path="graph.pkl",
+    extract_mode: str = "thread",
 ) -> GraphBuilder:
     """Get a GraphBuilder instance.
 
@@ -334,6 +405,7 @@ def get_graph_builder(
         resolver: Optional entity resolver instance.
         max_workers: Maximum number of concurrent workers. Default is 16.
         storage_path: Path to persist the graph. Default is "graph_data.pkl".
+        extract_mode: Extraction mode (thread/async/sync). Default is "thread".
 
     Returns:
         GraphBuilder instance.
@@ -343,6 +415,7 @@ def get_graph_builder(
         resolver=resolver,
         max_workers=max_workers,
         storage_path=storage_path,
+        extract_mode=extract_mode,
     )
 
 

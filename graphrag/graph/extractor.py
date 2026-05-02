@@ -45,46 +45,143 @@ class Extractor:
         self._setup_prompt()
 
     def _setup_prompt(self) -> None:
-        """Set up the entity extraction prompt template."""
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an entity and relation extraction assistant.
-Extract all entities and their relationships from the given text.
+        """Set up the entity extraction prompt template (LightRAG style)."""
+        # Build system prompt with escaped braces for JSON examples
+        system_prompt = """---Role---
+You are a Knowledge Graph Specialist responsible for extracting entities and relationships from the input text.
 
-Return entities as a list of strings or objects with name and type fields.
-Return relationships as a list of objects with source, target, and relation fields.
-All source and target in relationships must exist in entities."""),
-            ("human", "Text: {text}")
+---Instructions---
+1. **Entity Extraction & Output:**
+   * **Identification:** Identify clearly defined and meaningful entities in the input text.
+   * **Entity Details:** For each identified entity, extract the following information:
+     - `entity_name`: The name of the entity. If the entity name is case-insensitive, capitalize the first letter of each significant word (title case). Ensure **consistent naming** across the entire extraction process.
+     - `entity_type`: Categorize the entity using one of the following types: Person, Organization, Location, Event, Concept, Method, Content, Data, Artifact, NaturalObject. If none apply, use "Other".
+     - `entity_description`: Provide a concise yet comprehensive description of the entity's attributes and activities, based *solely* on the information present in the input text.
+
+2. **Relationship Extraction & Output:**
+   * **Identification:** Identify direct, clearly stated, and meaningful relationships between previously extracted entities.
+   * **N-ary Relationship Decomposition:** If a single statement describes a relationship involving more than two entities, decompose it into multiple binary (two-entity) relationship pairs.
+   * **Relationship Details:** For each binary relationship, extract the following fields:
+     - `source_entity`: The name of the source entity. Ensure **consistent naming** with entity extraction.
+     - `target_entity`: The name of the target entity. Ensure **consistent naming** with entity extraction.
+     - `relationship_keywords`: One or more high-level keywords summarizing the overarching nature, concepts, or themes of the relationship. Multiple keywords separated by comma `,`. **DO NOT use special delimiters.**
+     - `relationship_description`: A concise explanation of the nature of the relationship between the source and target entities.
+     - `weight`: Importance weight (1.0-10.0, default 1.0).
+
+3. **Output Order & Prioritization:**
+   * Output all extracted entities first, followed by all relationships.
+   * Within relationships, prioritize those **most significant** to the core meaning of the input text.
+
+4. **Context & Objectivity:**
+   * Ensure all entity names and descriptions are written in the **third person**.
+   * Explicitly name the subject or object; **avoid using pronouns** such as `this article`, `this paper`, `our company`, `I`, `you`.
+
+5. **Language:**
+   * The entire output must be written in the same language as the input text.
+   * Proper nouns should be retained in their original language if a proper translation is not available.
+
+---Examples---
+Example 1:
+Input: "Apple Inc. was founded by Steve Jobs in 1976. The company is headquartered in Cupertino, California."
+Output:
+{{
+  "entities": [
+    {{"entity_name": "Apple Inc.", "entity_type": "Organization", "entity_description": "A technology company founded in 1976 and headquartered in Cupertino, California."}},
+    {{"entity_name": "Steve Jobs", "entity_type": "Person", "entity_description": "Co-founder of Apple Inc."}},
+    {{"entity_name": "Cupertino", "entity_type": "Location", "entity_description": "A city in California where Apple Inc. is headquartered."}}
+  ],
+  "relationships": [
+    {{"source_entity": "Steve Jobs", "target_entity": "Apple Inc.", "relationship_keywords": "founding, entrepreneurship", "relationship_description": "Steve Jobs founded Apple Inc. in 1976.", "weight": 8.0}},
+    {{"source_entity": "Apple Inc.", "target_entity": "Cupertino", "relationship_keywords": "headquarters, location", "relationship_description": "Apple Inc. is headquartered in Cupertino, California.", "weight": 5.0}}
+  ]
+}}
+
+Example 2:
+Input: "北京是中国的首都，位于华北平原。北京市是中华人民共和国的政治文化中心。"
+Output:
+{{
+  "entities": [
+    {{"entity_name": "北京", "entity_type": "Location", "entity_description": "中国的首都，位于华北平原，是中华人民共和国的政治文化中心。"}},
+    {{"entity_name": "中国", "entity_type": "Location", "entity_description": "一个国家，北京是其首都。"}},
+    {{"entity_name": "华北平原", "entity_type": "Location", "entity_description": "一个地理区域，北京位于此平原上。"}}
+  ],
+  "relationships": [
+    {{"source_entity": "北京", "target_entity": "中国", "relationship_keywords": "capital, political center", "relationship_description": "北京是中国的首都和政治文化中心。", "weight": 9.0}},
+    {{"source_entity": "北京", "target_entity": "华北平原", "relationship_keywords": "location, geography", "relationship_description": "北京位于华北平原上。", "weight": 5.0}}
+  ]
+}}"""
+
+        human_prompt = """---Task---
+Extract entities and relationships from the input text below.
+
+---Instructions---
+1. Output ONLY valid JSON matching the ExtractionResult schema.
+2. Do NOT include any introductory or concluding remarks.
+3. Ensure all relationship source_entity and target_entity names exactly match entity_name in entities list.
+4. Use title case for entity names (capitalize significant words).
+5. Keep proper nouns in their original language.
+
+---Input Text---
+```
+{text}
+```
+
+---Output---"""
+
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", human_prompt)
         ])
 
     def _build_graph_document(self, result: ExtractionResult, document: Document) -> GraphDocument:
-        """Build GraphDocument from ExtractionResult."""
+        """Build GraphDocument from ExtractionResult (LightRAG style with metadata)."""
         # Validate and fix orphan edges
         try:
             result.validate_edges_reference_existing_entities()
         except ValueError:
             result.fix_orphan_edges()
 
-        # Build nodes
+        # Build nodes with metadata (LightRAG style)
         nodes_data = result.get_nodes()
-        nodes = [Node(id=node.name, type=node.type) for node in nodes_data]
+        chunk_id = document.metadata.get("chunk_id", "unknown_0")
+        file_path = document.metadata.get("source", "unknown_source")
+
+        nodes = []
+        for entity in nodes_data:
+            node = Node(
+                id=entity.entity_name,
+                type=entity.entity_type,
+                properties={
+                    "description": entity.entity_description,
+                    "chunk_id": chunk_id,
+                    "file_path": file_path,
+                }
+            )
+            nodes.append(node)
         node_map = {node.id: node for node in nodes}
 
         # Ensure all edge nodes exist
-        for edge in result.get_edges():
-            if edge.source not in node_map:
-                node_map[edge.source] = Node(id=edge.source, type="entity")
-            if edge.target not in node_map:
-                node_map[edge.target] = Node(id=edge.target, type="entity")
+        for rel in result.get_edges():
+            if rel.source_entity not in node_map:
+                node_map[rel.source_entity] = Node(id=rel.source_entity, type="Other", description="")
+            if rel.target_entity not in node_map:
+                node_map[rel.target_entity] = Node(id=rel.target_entity, type="Other", description="")
 
-        # Build relationships
-        relationships = [
-            Relationship(
-                source=node_map[edge.source],
-                target=node_map[edge.target],
-                type=edge.relation
+        relationships = []
+        for rel in result.get_edges():
+            relationship = Relationship(
+                source=node_map[rel.source_entity],
+                target=node_map[rel.target_entity],
+                type="RELATED_TO",
+                properties={
+                    "keywords": rel.relationship_keywords,
+                    "description": rel.relationship_description,
+                    "weight": rel.weight,
+                    "chunk_id": chunk_id,
+                    "file_path": file_path,
+                }
             )
-            for edge in result.get_edges()
-        ]
+            relationships.append(relationship)
 
         return GraphDocument(
             nodes=nodes,

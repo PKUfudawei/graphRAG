@@ -1,133 +1,172 @@
 """
 GraphRAG Retriever - 向量检索 + 图谱检索 + 多跳遍历
 """
-from typing import List, Optional, Dict, Any, Set, Tuple
+import os
+import sys
+from typing import List, Optional, Set, Tuple
 from collections import deque
 import faiss
 import numpy as np
 
 from langchain_core.documents import Document
-from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
+from langchain_community.graphs.graph_document import Node, Relationship
 
-class GraphRAGRetriever:
-    """GraphRAG 检索器 - 支持向量检索、图谱检索和多跳遍历
+# 添加父目录到路径
+_sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _sys_path not in sys.path:
+    sys.path.insert(0, _sys_path)
 
-    Args:
-        graph: Graph 实例（包含 NetworkX 图）
-        entity_index: FAISS 实体向量索引
-        entity_metadata: 实体元数据列表
-        embedding: 嵌入模型
-        vectorstore: LangChain FAISS vectorstore（可选）
-    """
+from rag.retriever import Retriever
+
+
+class GraphRAGRetriever(Retriever):
+    """GraphRAG 检索器 - 继承自 Retriever，支持 naive/local/global 三种检索模式"""
 
     def __init__(
         self,
         graph,
         entity_index: Optional[faiss.Index] = None,
         entity_metadata: Optional[List[dict]] = None,
+        relationship_index: Optional[faiss.Index] = None,
+        relationship_metadata: Optional[List[dict]] = None,
         embedding=None,
         vectorstore=None,
+        top_k: int = 10,
     ):
+        # 调用父类初始化
+        super().__init__(vectorstore=vectorstore, top_k=top_k)
+
         self.graph = graph
         self.entity_index = entity_index
         self.entity_metadata = entity_metadata or []
+        self.relationship_index = relationship_index
+        self.relationship_metadata = relationship_metadata or []
         self.embedding = embedding
-        self.vectorstore = vectorstore
 
-    def search_vectors(
-        self,
-        query: str,
-        top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
-        """向量检索
-
-        Args:
-            query: 查询文本
-            top_k: 返回结果数量
+    def _search_entities(
+        self, query: str, top_k: int
+    ) -> Tuple[List[str], float]:
+        """实体检索（私有方法）
 
         Returns:
-            (文档，相似度分数) 元组列表
-        """
-        if self.vectorstore is None or self.embedding is None:
-            return []
-
-        # 手动生成查询嵌入并搜索
-        # EmbeddingWrapper 使用 encode 方法
-        query_embedding = self.embedding.encode([query])[0]
-
-        # 使用 FAISS 底层索引搜索
-        index = self.vectorstore.index
-        scores, indices = index.search(np.array([query_embedding], dtype=np.float32), k=top_k)
-
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0 and idx < len(self.vectorstore.docstore._dict):
-                doc_id = list(self.vectorstore.docstore._dict.keys())[idx]
-                doc = self.vectorstore.docstore.search(doc_id)
-                results.append((doc, float(score)))
-
-        return results
-
-    def search_entities(
-        self,
-        query: str,
-        top_k: int = 5
-    ) -> List[Tuple[str, dict, float]]:
-        """基于 embedding 搜索相似实体
-
-        Args:
-            query: 查询文本
-            top_k: 返回结果数量
-
-        Returns:
-            (实体名称，元数据，相似度分数) 元组列表
+            (实体名称列表，最高相似度分数)
         """
         if self.entity_index is None or self.entity_index.ntotal == 0:
-            return []
+            return [], 0.0
 
-        # 生成查询嵌入
         query_embedding = self.embedding.encode([query])
         query_array = np.array(query_embedding, dtype=np.float32)
-
-        # FAISS 搜索
         scores, indices = self.entity_index.search(
             query_array, min(top_k, self.entity_index.ntotal)
         )
 
-        results = []
+        start_entities = []
+        graph_score = 0.0
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and idx < len(self.entity_metadata):
                 metadata = self.entity_metadata[idx]
                 entity_name = metadata.get("name", "")
-                results.append((entity_name, metadata, float(score)))
+                start_entities.append(entity_name)
+                if graph_score == 0.0:
+                    graph_score = float(score)
 
-        return results
+        return start_entities, graph_score
 
-    def traverse_multi_hop(
-        self,
-        start_entities: List[str],
-        max_hops: int = 2,
-        max_neighbors: int = 5
-    ) -> GraphDocument:
-        """从起始实体进行多跳遍历
+    def _search_relationships(
+        self, query: str, top_k: int
+    ) -> Tuple[List[Tuple[str, str, str]], float]:
+        """关系检索（私有方法）- 通过向量相似度找到最相关的关系
 
         Args:
-            start_entities: 起始实体名称列表
-            max_hops: 最大跳数
-            max_neighbors: 每跳最多扩展的邻居数
+            query: 查询文本
+            top_k: 返回 top_k 个最相关的关系
 
         Returns:
-            包含遍历结果的 GraphDocument
+            ((源实体，目标实体，关系类型) 列表，最高相似度分数)
+        """
+        if self.relationship_index is None or self.relationship_index.ntotal == 0:
+            return [], 0.0
+
+        # 使用关系描述作为查询（类似 LightRAG 的做法）
+        query_embedding = self.embedding.encode([query])
+        query_array = np.array(query_embedding, dtype=np.float32)
+        scores, indices = self.relationship_index.search(
+            query_array, min(top_k, self.relationship_index.ntotal)
+        )
+
+        relationships = []
+        max_score = 0.0
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and idx < len(self.relationship_metadata):
+                metadata = self.relationship_metadata[idx]
+                relationships.append((
+                    metadata["src_id"],
+                    metadata["tgt_id"],
+                    metadata.get("rel_type", "RELATED_TO")
+                ))
+                if max_score == 0.0:
+                    max_score = float(score)
+
+        return relationships, max_score
+
+    def _get_entities_from_relationships(
+        self, relationships: List[Tuple[str, str, str]]
+    ) -> Tuple[List[Node], List[Relationship]]:
+        """从关系中抽取实体和关系（不往外跳）
+
+        Args:
+            relationships: (源实体，目标实体，关系类型) 列表
+
+        Returns:
+            (节点列表，关系列表)
+        """
+        graph = self.graph
+        nodes: List[Node] = []
+        node_map: dict = {}
+        rels: List[Relationship] = []
+        seen_entities: Set[str] = set()
+
+        for src_id, tgt_id, rel_type in relationships:
+            if src_id not in seen_entities and src_id in graph:
+                node_data = graph.nodes[src_id]
+                node = Node(id=src_id, type=node_data.get("type", "Entity"))
+                nodes.append(node)
+                node_map[src_id] = node
+                seen_entities.add(src_id)
+
+            if tgt_id not in seen_entities and tgt_id in graph:
+                node_data = graph.nodes[tgt_id]
+                node = Node(id=tgt_id, type=node_data.get("type", "Entity"))
+                nodes.append(node)
+                node_map[tgt_id] = node
+                seen_entities.add(tgt_id)
+
+            # 添加关系
+            if src_id in node_map and tgt_id in node_map:
+                rels.append(Relationship(
+                    source=node_map[src_id],
+                    target=node_map[tgt_id],
+                    type=rel_type
+                ))
+
+        return nodes, rels
+
+    def _bfs_traverse(
+        self, start_entities: List[str], max_hops: int, max_neighbors: int
+    ) -> Tuple[List[Node], List[Relationship]]:
+        """BFS 多跳遍历（私有方法）
+
+        Returns:
+            (节点列表，关系列表)
         """
         graph = self.graph
         visited_nodes: Set[str] = set()
         nodes: List[Node] = []
-        node_map: Dict[str, Node] = {}
+        node_map: dict = {}
         relationships: List[Relationship] = []
 
-        # 首先查找并添加起始节点
+        # 添加起始节点
         for entity in start_entities:
-            # 尝试精确匹配
             if entity in graph:
                 node_data = graph.nodes[entity]
                 node = Node(id=entity, type=node_data.get("type", "Entity"))
@@ -135,264 +174,419 @@ class GraphRAGRetriever:
                 node_map[entity] = node
                 visited_nodes.add(entity)
 
-        # 使用 BFS 遍历
-        queue = deque([(entity_id, 0) for entity_id in visited_nodes])
-
+        # BFS 遍历
+        queue = deque([(eid, 0) for eid in visited_nodes])
         while queue:
             current_entity, current_hop = queue.popleft()
-
             if current_hop >= max_hops:
                 continue
 
-            # 获取当前实体的邻居（双向）
+            # 获取双向邻居
             neighbors = []
-            # 出边
             for target in graph.successors(current_entity):
                 if target not in visited_nodes:
                     edge_data = graph[current_entity][target]
                     neighbors.append((target, edge_data.get("rel_type", "RELATED_TO")))
-            # 入边
             for source in graph.predecessors(current_entity):
                 if source not in visited_nodes:
                     edge_data = graph[source][current_entity]
                     neighbors.append((source, edge_data.get("rel_type", "RELATED_TO")))
 
-            # 限制邻居数量
             neighbors = neighbors[:max_neighbors]
-
             for neighbor_id, rel_type in neighbors:
-                # 确保当前节点在 map 中
                 if current_entity not in node_map:
                     node_data = graph.nodes[current_entity]
                     node = Node(id=current_entity, type=node_data.get("type", "Entity"))
                     nodes.append(node)
                     node_map[current_entity] = node
 
-                # 添加邻居节点
                 visited_nodes.add(neighbor_id)
                 neighbor_data = graph.nodes[neighbor_id]
                 neighbor_node = Node(id=neighbor_id, type=neighbor_data.get("type", "Entity"))
                 nodes.append(neighbor_node)
                 node_map[neighbor_id] = neighbor_node
 
-                # 添加关系
-                source_node = node_map[current_entity]
-                target_node = node_map[neighbor_id]
                 relationships.append(Relationship(
-                    source=source_node,
-                    target=target_node,
+                    source=node_map[current_entity],
+                    target=neighbor_node,
                     type=rel_type
                 ))
-
-                # 添加到队列继续遍历
                 queue.append((neighbor_id, current_hop + 1))
 
-        # 创建源文档
-        source_doc = Document(
-            page_content="",
-            metadata={"source": "multi_hop_traversal", "hops": max_hops}
-        )
+        return nodes, relationships
 
-        return GraphDocument(
-            nodes=nodes,
-            relationships=relationships,
-            source=source_doc
-        )
-
-    def retrieve(
-        self,
-        query: str,
-        top_k_vectors: int = 5,
-        top_k_entities: int = 3,
-        max_hops: int = 2,
-        max_neighbors: int = 5,
-        vector_weight: float = 0.5,
-        graph_weight: float = 0.5
+    def _get_chunks_by_entity_ids(
+        self, entity_ids: List[str], max_chunks: int = 10
     ) -> List[Document]:
-        """混合检索：向量检索 + 图谱检索 + 多跳遍历
+        """从实体节点获取相关的文本 chunk（类似 LightRAG 的做法）
 
         Args:
-            query: 查询文本
-            top_k_vectors: 向量检索返回数量
-            top_k_entities: 实体检索返回数量
-            max_hops: 多跳遍历最大跳数
-            max_neighbors: 多跳遍历每跳最大邻居数
-            vector_weight: 向量检索权重
-            graph_weight: 图谱检索权重
+            entity_ids: 实体 ID 列表
+            max_chunks: 最大返回 chunk 数量
 
         Returns:
-            检索结果文档列表
+            Document 列表
+        """
+        if self.vectorstore is None:
+            return []
+
+        # 收集所有 chunk_ids，并统计出现频率
+        chunk_id_count: dict[str, int] = {}
+        chunk_id_to_entities: dict[str, list[str]] = {}
+
+        for entity_id in entity_ids:
+            if entity_id in self.graph:
+                node_data = self.graph.nodes[entity_id]
+                chunk_ids = node_data.get("chunk_ids", [])
+                for chunk_id in chunk_ids:
+                    chunk_id_count[chunk_id] = chunk_id_count.get(chunk_id, 0) + 1
+                    if chunk_id not in chunk_id_to_entities:
+                        chunk_id_to_entities[chunk_id] = []
+                    chunk_id_to_entities[chunk_id].append(entity_id)
+
+        # 按出现频率排序（频率高的优先，类似 LightRAG 的 WEIGHT 方法）
+        sorted_chunk_ids = sorted(
+            chunk_id_count.keys(),
+            key=lambda x: chunk_id_count[x],
+            reverse=True
+        )
+
+        # 构建 chunk_id 到 docstore key 的映射
+        chunk_id_to_key: dict[str, str] = {}
+        for key, doc in self.vectorstore.docstore._dict.items():
+            chunk_id = doc.metadata.get("chunk_id")
+            if chunk_id:
+                chunk_id_to_key[chunk_id] = key
+
+        # 获取 chunk
+        chunks: List[Document] = []
+        for chunk_id in sorted_chunk_ids[:max_chunks]:
+            if chunk_id in chunk_id_to_key:
+                doc = self.vectorstore.docstore.search(chunk_id_to_key[chunk_id])
+                doc.metadata["related_entities"] = chunk_id_to_entities[chunk_id]
+                doc.metadata["entity_count"] = chunk_id_count[chunk_id]
+                chunks.append(doc)
+
+        return chunks
+
+    def _get_chunks_by_relationships(
+        self, relationships: List[Tuple[str, str, str]], max_chunks: int = 10
+    ) -> List[Document]:
+        """从关系边获取相关的文本 chunk（类似 LightRAG 的 global search）
+
+        Args:
+            relationships: (源实体，目标实体，关系类型) 列表
+            max_chunks: 最大返回 chunk 数量
+
+        Returns:
+            Document 列表
+        """
+        if self.vectorstore is None:
+            return []
+
+        # 收集所有 chunk_ids，并统计出现频率
+        chunk_id_count: dict[str, int] = {}
+        chunk_id_to_relationships: dict[str, list[tuple]] = {}
+
+        for src_id, tgt_id, rel_type in relationships:
+            edge_data = self.graph.get_edge_data(src_id, tgt_id)
+            if edge_data:
+                # 使用 chunk_ids 字段存储 chunk_ids
+                chunk_ids = edge_data.get("chunk_ids", [])
+                if isinstance(chunk_ids, str):
+                    # 如果是字符串，可能需要分割
+                    chunk_ids = chunk_ids.split("\n") if "\n" in chunk_ids else [chunk_ids]
+
+                for chunk_id in chunk_ids:
+                    if chunk_id:  # 过滤空字符串
+                        chunk_id_count[chunk_id] = chunk_id_count.get(chunk_id, 0) + 1
+                        if chunk_id not in chunk_id_to_relationships:
+                            chunk_id_to_relationships[chunk_id] = []
+                        chunk_id_to_relationships[chunk_id].append((src_id, tgt_id, rel_type))
+
+        # 按出现频率排序
+        sorted_chunk_ids = sorted(
+            chunk_id_count.keys(),
+            key=lambda x: chunk_id_count[x],
+            reverse=True
+        )
+
+        # 构建 chunk_id 到 docstore key 的映射
+        chunk_id_to_key: dict[str, str] = {}
+        for key, doc in self.vectorstore.docstore._dict.items():
+            chunk_id = doc.metadata.get("chunk_id")
+            if chunk_id:
+                chunk_id_to_key[chunk_id] = key
+
+        # 获取 chunk
+        chunks: List[Document] = []
+        for chunk_id in sorted_chunk_ids[:max_chunks]:
+            if chunk_id in chunk_id_to_key:
+                doc = self.vectorstore.docstore.search(chunk_id_to_key[chunk_id])
+                doc.metadata["related_relationships"] = chunk_id_to_relationships[chunk_id]
+                doc.metadata["relationship_count"] = chunk_id_count[chunk_id]
+                chunks.append(doc)
+
+        return chunks
+
+    def naive_search(self, query: str, top_k: int = 5) -> List[Document]:
+        """朴素检索：纯向量检索，直接调用父类的 vector_search"""
+        if self.vectorstore is None:
+            return []
+        # 临时修改 top_k
+        original_top_k = self.top_k
+        self.top_k = top_k
+        docs = self.vector_search(query)
+        self.top_k = original_top_k
+        # 更新 metadata
+        for i, doc in enumerate(docs):
+            doc.metadata["retrieval_type"] = "naive"
+            doc.metadata["rank"] = i
+        return docs
+
+    def local_search(
+        self,
+        query: str,
+        top_k_entities: int = 3,
+        max_hops: int = 1,
+        max_neighbors: int = 3,
+        max_chunks: int = 10
+    ) -> List[Document]:
+        """局部检索：实体检索 + 多跳遍历 + 相关 chunk，适合精确问答
+
+        参考 LightRAG 的 local search 实现：
+        - 通过向量相似度检索最相关的实体（节点）
+        - 从实体出发进行多跳遍历，获取相关的实体和关系
+        - 从实体节点的 chunk_ids 获取相关的文本 chunk
         """
         results = []
 
-        # 1. 向量检索
-        vector_results = self.search_vectors(query, top_k=top_k_vectors)
-        for doc, score in vector_results:
-            doc.metadata["score"] = score * vector_weight
-            doc.metadata["retrieval_type"] = "vector"
-            results.append(doc)
+        # 实体检索
+        start_entities, graph_score = self._search_entities(query, top_k_entities)
+        if not start_entities:
+            return results
 
-        # 2. 实体检索
-        entity_results = self.search_entities(query, top_k=top_k_entities)
-        if entity_results:
-            # 3. 多跳遍历
-            start_entities = [entity_name for entity_name, _, _ in entity_results]
-            graph_doc = self.traverse_multi_hop(
-                start_entities=start_entities,
-                max_hops=max_hops,
-                max_neighbors=max_neighbors
-            )
+        # 多跳遍历
+        nodes, relationships = self._bfs_traverse(start_entities, max_hops, max_neighbors)
 
-            # 将遍历结果转换为 Document
-            if graph_doc.nodes or graph_doc.relationships:
-                # 构建上下文文本
-                context_lines = []
+        # 收集所有涉及的实体 ID（包括起始实体和遍历得到的实体）
+        all_entity_ids = [n.id for n in nodes]
 
-                # 添加实体信息
-                for node in graph_doc.nodes:
-                    chunk_ids = self.graph.nodes[node.id].get("chunk_ids", [])
-                    context_lines.append(f"Entity: {node.id} (Type: {node.type}, Chunks: {chunk_ids})")
+        # 从实体获取相关 chunk（类似 LightRAG）
+        chunks = self._get_chunks_by_entity_ids(all_entity_ids, max_chunks=max_chunks)
+        for i, chunk in enumerate(chunks):
+            chunk.metadata["retrieval_type"] = "local_chunk"
+            chunk.metadata["rank"] = i
+            results.append(chunk)
 
-                # 添加关系信息
-                for rel in graph_doc.relationships:
-                    context_lines.append(
-                        f"  {rel.source.id} --{rel.type}--> {rel.target.id}"
-                    )
+        # 构建图结构上下文
+        context_lines = [f"Entity: {n.id} (Type: {n.type})" for n in nodes]
+        context_lines.extend(f"  {rel.source.id} --{rel.type}--> {rel.target.id}" for rel in relationships)
 
-                # 使用最高相似度的实体分数作为图谱分数
-                graph_score = entity_results[0][2] if entity_results else 0.0
+        context_doc = Document(
+            page_content="\n".join(context_lines),
+            metadata={
+                "source": "local_graph",
+                "score": graph_score,
+                "retrieval_type": "local_graph",
+                "entities": all_entity_ids,
+                "relationships": len(relationships)
+            }
+        )
+        results.append(context_doc)
+        return results
 
-                context_doc = Document(
-                    page_content="\n".join(context_lines),
-                    metadata={
-                        "source": "graph_traversal",
-                        "score": graph_score * graph_weight,
-                        "retrieval_type": "graph",
-                        "entities": [n.id for n in graph_doc.nodes],
-                        "relationships": len(graph_doc.relationships)
-                    }
-                )
-                results.append(context_doc)
+    def local_search_with_stats(
+        self,
+        query: str,
+        top_k_entities: int = 3,
+        max_hops: int = 1,
+        max_neighbors: int = 3,
+        max_chunks: int = 10
+    ) -> dict:
+        """局部检索（带统计信息）"""
+        # 实体检索
+        start_entities, graph_score = self._search_entities(query, top_k_entities)
+        if not start_entities:
+            return {'results': [], 'stats': {'matched_entities': 0, 'traversed_nodes': 0, 'traversed_relationships': 0, 'chunks_from_entities': 0}}
 
-        # 按分数排序
-        results.sort(key=lambda d: d.metadata.get("score", 0), reverse=True)
+        # 多跳遍历
+        nodes, relationships = self._bfs_traverse(start_entities, max_hops, max_neighbors)
+
+        # 收集所有涉及的实体 ID
+        all_entity_ids = [n.id for n in nodes]
+
+        # 从实体获取相关 chunk
+        chunks = self._get_chunks_by_entity_ids(all_entity_ids, max_chunks=max_chunks)
+        results = []
+        for i, chunk in enumerate(chunks):
+            chunk.metadata["retrieval_type"] = "local_chunk"
+            chunk.metadata["rank"] = i
+            results.append(chunk)
+
+        # 构建图结构上下文
+        context_lines = [f"Entity: {n.id} (Type: {n.type})" for n in nodes]
+        context_lines.extend(f"  {rel.source.id} --{rel.type}--> {rel.target.id}" for rel in relationships)
+
+        context_doc = Document(
+            page_content="\n".join(context_lines),
+            metadata={
+                "source": "local_graph",
+                "score": graph_score,
+                "retrieval_type": "local_graph",
+                "entities": all_entity_ids,
+                "relationships": len(relationships)
+            }
+        )
+        results.append(context_doc)
+
+        return {
+            'results': results,
+            'stats': {
+                'matched_entities': len(start_entities),
+                'traversed_nodes': len(nodes),
+                'traversed_relationships': len(relationships),
+                'chunks_from_entities': len(chunks)
+            }
+        }
+
+    def global_search(
+        self,
+        query: str,
+        top_k_relationships: int = 10,
+        max_chunks: int = 10
+    ) -> List[Document]:
+        """全局检索：关系检索 + 相关 chunk，适合综合问题
+
+        参考 LightRAG 的 global search 实现：
+        - 通过向量相似度检索最相关的关系（边）
+        - 从关系的 source_id 获取相关的文本 chunk
+        - 只获取这些关系直接连接的实体，不进行多跳扩展
+        """
+        results = []
+
+        # 1. 关系检索
+        related_relationships, graph_score = self._search_relationships(query, top_k_relationships)
+
+        if not related_relationships:
+            return results
+
+        # 2. 从关系边获取相关 chunk（类似 LightRAG）
+        chunks = self._get_chunks_by_relationships(related_relationships, max_chunks=max_chunks)
+        for i, chunk in enumerate(chunks):
+            chunk.metadata["retrieval_type"] = "global_chunk"
+            chunk.metadata["rank"] = i
+            results.append(chunk)
+
+        # 3. 从关系中抽取涉及的实体（不往外跳）
+        nodes, relationships = self._get_entities_from_relationships(related_relationships)
+
+        if not nodes:
+            return results
+
+        # 构建图结构上下文
+        context_lines = [f"Entity: {n.id} (Type: {n.type})" for n in nodes]
+        context_lines.extend(f"  {rel.source.id} --{rel.type}--> {rel.target.id}" for rel in relationships)
+
+        context_doc = Document(
+            page_content="\n".join(context_lines),
+            metadata={
+                "source": "global_graph",
+                "score": graph_score,
+                "retrieval_type": "global_graph",
+                "entities": [n.id for n in nodes],
+                "relationships": len(relationships)
+            }
+        )
+        results.append(context_doc)
 
         return results
+
+    def global_search_with_stats(
+        self,
+        query: str,
+        top_k_relationships: int = 10,
+        max_chunks: int = 10
+    ) -> dict:
+        """全局检索（带统计信息）"""
+        results = []
+
+        # 1. 关系检索
+        related_relationships, graph_score = self._search_relationships(query, top_k_relationships)
+
+        if not related_relationships:
+            return {
+                'results': results,
+                'stats': {
+                    'matched_relationships': 0,
+                    'chunks_from_relations': 0,
+                    'entities': 0
+                }
+            }
+
+        # 2. 从关系边获取相关 chunk
+        chunks = self._get_chunks_by_relationships(related_relationships, max_chunks=max_chunks)
+        chunk_count = len(chunks)
+        for i, chunk in enumerate(chunks):
+            chunk.metadata["retrieval_type"] = "global_chunk"
+            chunk.metadata["rank"] = i
+            results.append(chunk)
+
+        # 3. 从关系中抽取涉及的实体
+        nodes, relationships = self._get_entities_from_relationships(related_relationships)
+
+        if not nodes:
+            return {
+                'results': results,
+                'stats': {
+                    'matched_relationships': len(related_relationships),
+                    'chunks_from_relations': chunk_count,
+                    'entities': 0
+                }
+            }
+
+        # 构建图结构上下文
+        context_lines = [f"Entity: {n.id} (Type: {n.type})" for n in nodes]
+        context_lines.extend(f"  {rel.source.id} --{rel.type}--> {rel.target.id}" for rel in relationships)
+
+        context_doc = Document(
+            page_content="\n".join(context_lines),
+            metadata={
+                "source": "global_graph",
+                "score": graph_score,
+                "retrieval_type": "global_graph",
+                "entities": [n.id for n in nodes],
+                "relationships": len(relationships)
+            }
+        )
+        results.append(context_doc)
+
+        return {
+            'results': results,
+            'stats': {
+                'matched_relationships': len(related_relationships),
+                'chunks_from_relations': chunk_count,
+                'entities': len(nodes)
+            }
+        }
 
 
 def get_graphrag_retriever(
     graph,
     entity_index: Optional[faiss.Index] = None,
     entity_metadata: Optional[List[dict]] = None,
+    relationship_index: Optional[faiss.Index] = None,
+    relationship_metadata: Optional[List[dict]] = None,
     embedding=None,
     vectorstore=None,
 ) -> GraphRAGRetriever:
-    """获取 GraphRAG 检索器实例
-
-    Args:
-        graph: graph 实例
-        entity_index: FAISS 实体向量索引
-        entity_metadata: 实体元数据列表
-        embedding: 嵌入模型
-        vectorstore: LangChain FAISS vectorstore
-
-    Returns:
-        GraphRAGRetriever 实例
-    """
+    """获取 GraphRAG 检索器实例"""
     return GraphRAGRetriever(
         graph=graph,
         entity_index=entity_index,
         entity_metadata=entity_metadata,
+        relationship_index=relationship_index,
+        relationship_metadata=relationship_metadata,
         embedding=embedding,
         vectorstore=vectorstore,
     )
-
-
-if __name__ == "__main__":
-    import pickle
-    print("=" * 60)
-    print("GraphRAGRetriever 测试")
-    print("=" * 60)
-
-    from graphrag.indexer import get_graphrag_indexer
-
-    # 加载已生成的索引
-    print("\n[Test 1] Loading index from ./database...")
-    storage_path = "./database"
-
-    # 加载 graph
-    graph_path = f"{storage_path}/graph.pkl"
-    with open(graph_path, "rb") as f:
-        graph = pickle.load(f)
-    print(f"  Loaded graph with {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
-
-    # 加载 entities
-    entities_path = f"{storage_path}/entities.pkl"
-    with open(entities_path, "rb") as f:
-        entities_data = pickle.load(f)
-    entity_index = entities_data["index"]
-    entity_metadata = entities_data["metadata"]
-    print(f"  Loaded {entity_index.ntotal} entities")
-
-    # 加载 vectorstore
-    from langchain_community.vectorstores import FAISS
-    vectorstore_path = f"{storage_path}/vectorstore"
-    from models.embedding import get_embedding
-    embedding = get_embedding()
-    vectorstore = FAISS.load_local(
-        vectorstore_path,
-        embedding,
-        allow_dangerous_deserialization=True
-    )
-    print(f"  Loaded vectorstore")
-
-
-    # 创建检索器
-    print("\n[Test 2] Create retriever...")
-    retriever = get_graphrag_retriever(
-        graph=graph,
-        entity_index=entity_index,
-        entity_metadata=entity_metadata,
-        embedding=embedding,
-        vectorstore=vectorstore
-    )
-    print("  ✓ Passed")
-
-    # 测试实体检索
-    print("\n[Test 3] Search entities...")
-    entity_results = retriever.search_entities("中国的首都", top_k=3)
-    print(f"  Found {len(entity_results)} entities")
-    for name, metadata, score in entity_results:
-        print(f"    - {name} ({metadata.get('type', metadata.get('type', 'Unknown'))}) (score: {score:.4f})")
-    print("  ✓ Passed")
-
-    # 测试多跳遍历
-    print("\n[Test 4] Multi-hop traversal...")
-    graph_doc = retriever.traverse_multi_hop(["北京市"], max_hops=2, max_neighbors=5)
-    print(f"  Nodes: {len(graph_doc.nodes)}")
-    print(f"  Relationships: {len(graph_doc.relationships)}")
-    for node in graph_doc.nodes:
-        print(f"    - {node.id} ({node.type})")
-    for rel in graph_doc.relationships:
-        print(f"    - {rel.source.id} --{rel.type}--> {rel.target.id}")
-    print("  ✓ Passed")
-
-    # 测试混合检索
-    print("\n[Test 5] Hybrid retrieval...")
-    hybrid_results = retriever.retrieve(
-        "中国的首都是哪里？",
-        top_k_vectors=3,
-        top_k_entities=3,
-        max_hops=2,
-        graph_weight=0.7
-    )
-    print(f"  Found {len(hybrid_results)} results")
-    for doc in hybrid_results:
-        print(f"    [{doc.metadata.get('retrieval_type')}] score: {doc.metadata.get('score', 0):.4f}")
-        content = doc.page_content[:100] if len(doc.page_content) > 100 else doc.page_content
-        print(f"      {content}...")
-    print("  ✓ Passed")
-
-    print("\n" + "=" * 60)
-    print("All tests passed!")
-    print("=" * 60)

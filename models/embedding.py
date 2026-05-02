@@ -16,21 +16,25 @@ class EmbeddingWrapper:
         return np.array(embeddings, dtype=np.float32)
 
 
-def get_embedding(model="BAAI/bge-m3", device="cuda:0") -> EmbeddingWrapper:
+def get_embedding(model="BAAI/bge-m3", device="cpu") -> EmbeddingWrapper:
     """
     获取嵌入模型实例
 
     Args:
         model: 嵌入模型名称
-        device: 运行设备
+        device: 运行设备 (默认 cpu)
 
     Returns:
         EmbedderWrapper 实例
     """
+    # 只传递 device 参数，避免 device_map 导致的问题
+    model_kwargs = {"device": device}
+
     return EmbeddingWrapper(HuggingFaceEmbeddings(
         model_name=model,
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
+        model_kwargs=model_kwargs,
+        encode_kwargs={"normalize_embeddings": True},
+        show_progress=False
     ))
     
 

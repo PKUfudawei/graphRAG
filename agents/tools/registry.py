@@ -1,19 +1,44 @@
 """工具注册表"""
-from typing import Dict, Type, Any, Optional
+from typing import Dict, Type, Any, Optional, Callable
 from .base import BaseTool, ToolResult
-from .rag_tool import RAGTool
 from .graphrag_tool import GraphRAGTool
+
+
+class SearchModeTool(BaseTool):
+    """GraphRAG 检索模式工具包装器"""
+
+    def __init__(self, mode: str, storage_path: str = "./storage/graphrag_index"):
+        self.mode = mode
+        self.graphrag_tool = GraphRAGTool(storage_path=storage_path)
+
+    def get_name(self) -> str:
+        return self.mode
+
+    def search(self, query: str, **kwargs) -> ToolResult:
+        """执行搜索"""
+        return getattr(self.graphrag_tool, f"{self.mode}_search")(query, **kwargs)
+
+    def structured_search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """结构化搜索接口"""
+        query = payload.get("query", "")
+        result = getattr(self.graphrag_tool, f"{self.mode}_search")(query, **payload)
+        return {
+            "success": result.success,
+            "answer": result.answer,
+            "retrieval_results": result.evidence,
+            "error": result.error
+        }
 
 
 class ToolRegistry:
     """工具注册表"""
 
-    _tools: Dict[str, Type[BaseTool]] = {}
+    _tools: Dict[str, Any] = {}  # 可以是类或工厂函数
 
     @classmethod
-    def register(cls, name: str, tool_class: Type[BaseTool]) -> None:
-        """注册工具"""
-        cls._tools[name] = tool_class
+    def register(cls, name: str, tool: Any) -> None:
+        """注册工具（类或工厂函数）"""
+        cls._tools[name] = tool
 
     @classmethod
     def unregister(cls, name: str) -> None:
@@ -22,19 +47,24 @@ class ToolRegistry:
             del cls._tools[name]
 
     @classmethod
-    def get_tool(cls, name: str) -> Optional[Type[BaseTool]]:
-        """获取工具类"""
+    def get_tool(cls, name: str) -> Optional[Any]:
+        """获取工具类或工厂函数"""
         return cls._tools.get(name)
 
     @classmethod
     def create_tool(cls, name: str, **kwargs) -> Optional[BaseTool]:
         """创建工具实例"""
-        tool_class = cls.get_tool(name)
-        if tool_class:
+        tool = cls.get_tool(name)
+        if tool:
             try:
-                return tool_class(**kwargs)
+                # 如果是工厂函数
+                if callable(tool) and not isinstance(tool, type):
+                    return tool(**kwargs)
+                # 如果是类
+                elif isinstance(tool, type):
+                    return tool(**kwargs)
             except TypeError:
-                return tool_class()
+                pass
         return None
 
     @classmethod
@@ -48,8 +78,18 @@ class ToolRegistry:
         cls._tools.clear()
 
 
-# 默认注册工具
-ToolRegistry.register("rag", RAGTool)
-ToolRegistry.register("graphrag", GraphRAGTool)
+# 注册三种检索模式作为独立工具
+def create_naive_tool(**kwargs) -> BaseTool:
+    return SearchModeTool(mode="naive", **kwargs)
 
-__all__ = ["ToolRegistry", "BaseTool", "ToolResult"]
+def create_local_tool(**kwargs) -> BaseTool:
+    return SearchModeTool(mode="local", **kwargs)
+
+def create_global_tool(**kwargs) -> BaseTool:
+    return SearchModeTool(mode="global", **kwargs)
+
+ToolRegistry.register("naive", create_naive_tool)
+ToolRegistry.register("local", create_local_tool)
+ToolRegistry.register("global", create_global_tool)
+
+__all__ = ["ToolRegistry", "BaseTool", "ToolResult", "SearchModeTool"]

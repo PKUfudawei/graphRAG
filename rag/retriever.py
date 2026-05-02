@@ -50,9 +50,8 @@ class Retriever:
         """
         self.bm25_retriever = LangchainBM25Retriever.from_documents(documents)
 
-    def retrieve(self, query: str) -> List[Document]:
-        """
-        检索相关文档（向量检索）
+    def vector_search(self, query: str) -> List[Document]:
+        """向量检索
 
         Args:
             query: 查询文本
@@ -60,13 +59,25 @@ class Retriever:
         Returns:
             检索到的文档列表
         """
-        # 使用 FAISS 进行相似度搜索
         docs = self.vectorstore.similarity_search(query, k=self.top_k)
-
-        # 如果有 reranker，进行重排序
         if self.reranker:
             docs = self.reranker.rerank(query, docs)
+        return docs
 
+    def bm25_search(self, query: str) -> List[Document]:
+        """BM25 关键词检索
+
+        Args:
+            query: 查询文本
+
+        Returns:
+            检索到的文档列表
+        """
+        if self.bm25_retriever is None:
+            raise ValueError("BM25 retriever not initialized. Call set_bm25_retriever() first.")
+        docs = self.bm25_retriever.get_relevant_documents(query, k=self.top_k)
+        if self.reranker:
+            docs = self.reranker.rerank(query, docs)
         return docs
 
     def hybrid_search(
@@ -77,7 +88,7 @@ class Retriever:
         bm25_weight: float = 0.5,
     ) -> List[Document]:
         """
-        混合检索（向量检索 + BM25 关键词检索）
+        混合检索（调用 vector_search() 和 bm25_search()）
 
         Args:
             query: 查询文本
@@ -216,7 +227,7 @@ if __name__ == "__main__":
         top_k=3,
         reranker=None,
     )
-    results = retriever_no_rerank.retrieve("What is the capital of China?")
+    results = retriever_no_rerank.vector_search("What is the capital of China?")
     print(f"✓ 检索到 {len(results)} 个文档:")
     for i, doc in enumerate(results, 1):
         print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
@@ -233,20 +244,20 @@ if __name__ == "__main__":
         reranker_device="cuda:1",
         rerank_top_k=3,
     )
-    results = retriever.retrieve("What is the capital of China?")
+    results = retriever.vector_search("What is the capital of China?")
     print(f"✓ 检索到 {len(results)} 个文档 (rerank_top_k=3):")
     for i, doc in enumerate(results, 1):
         print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
     print()
 
-    # 测试 3: hybrid_search 方法（带 BM25）- 需要 rank_bm25 依赖
+    # 测试 3: hybrid_retrieve 方法（带 BM25）- 需要 rank_bm25 依赖
     print("-" * 40)
-    print("测试 3: hybrid_search 方法（带 BM25）")
+    print("测试 3: hybrid_retrieve 方法（带 BM25）")
     print("-" * 40)
     try:
         retriever.set_bm25_retriever(chunks)
         results = retriever.hybrid_search("programming language for web")
-        print(f"✓ hybrid_search 检索到 {len(results)} 个文档:")
+        print(f"✓ hybrid_retrieve 检索到 {len(results)} 个文档:")
         for i, doc in enumerate(results, 1):
             print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")
     except ImportError as e:
@@ -257,7 +268,7 @@ if __name__ == "__main__":
     print("-" * 40)
     print("测试 4: 不同的查询 - 'machine learning'")
     print("-" * 40)
-    results = retriever.retrieve("machine learning")
+    results = retriever.vector_search("machine learning")
     print(f"✓ 检索到 {len(results)} 个文档:")
     for i, doc in enumerate(results, 1):
         print(f"  {i}. [{doc.metadata.get('source')}] {doc.page_content[:50]}...")

@@ -8,8 +8,9 @@ from datetime import datetime
 
 class TaskType(Enum):
     """任务类型枚举"""
-    RAG = "rag"                    # 简单向量检索
-    GRAPH_RAG = "graphrag"         # 图谱检索
+    NAIVE = "naive"                # 朴素向量检索
+    LOCAL = "local"                # 局部图谱检索
+    GLOBAL = "global"              # 全局图谱检索
     DEEP_RESEARCH = "deep_research"  # 深度研究
 
 

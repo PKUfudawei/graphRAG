@@ -19,17 +19,24 @@ PLANNER_PROMPT = """
 
 ## 可用工具
 
-1. **rag** - 简单向量检索
-   - 适用场景：事实性问题，如"什么是 X"、"X 在哪里"、"X 的定义"
+1. **naive** - 朴素向量检索
+   - 纯向量相似度搜索
+   - 适用场景：简单事实性问题，如"什么是 X"、"X 在哪里"
 
-2. **graphrag** - 图谱检索
-   - 适用场景：关系性问题，如"X 和 Y 的关系"、"X 如何影响 Y"、"X 的上下游"
+2. **local** - 局部图谱检索
+   - 实体检索 + 单跳遍历
+   - 适用场景：精确问答，如"X 和 Y 的关系"、"X 的属性"
+
+3. **global** - 全局图谱检索
+   - 向量检索 + 多跳图谱遍历
+   - 适用场景：综合分析问题，如"分析 X 的发展"、"X 对 Y 的影响"
 
 ## 任务规划规则
 
 1. **单任务场景**（简单查询）：
-   - 事实性问题 → 使用 rag 工具
-   - 关系性问题 → 使用 graphrag 工具
+   - 简单事实性问题 → 使用 naive 工具
+   - 关系性问题 → 使用 local 工具
+   - 复杂综合问题 → 使用 global 工具
 
 2. **多任务场景**（复杂查询）：
    - 涉及多个实体/概念的对比/分析 → 分解为多个子任务
@@ -49,13 +56,13 @@ PLANNER_PROMPT = """
     "tasks": [
         {{
             "task_id": "task_xxx",
-            "task_type": "rag" 或 "graphrag",
+            "task_type": "naive" 或 "local" 或 "global",
             "query": "具体查询",
             "description": "任务描述",
-            "depends_on": []  // 依赖的任务 ID 列表
+            "depends_on": []
         }}
     ],
-    "execution_order": ["task_xxx", "task_yyy"]  // 拓扑排序后的执行顺序
+    "execution_order": ["task_xxx", "task_yyy"]
 }}
 ```
 
@@ -72,7 +79,7 @@ PLANNER_PROMPT = """
     "tasks": [
         {{
             "task_id": "task_001",
-            "task_type": "rag",
+            "task_type": "naive",
             "query": "什么是人工智能",
             "description": "检索人工智能的定义",
             "depends_on": []
@@ -95,21 +102,21 @@ PLANNER_PROMPT = """
     "tasks": [
         {{
             "task_id": "task_001",
-            "task_type": "graphrag",
+            "task_type": "global",
             "query": "北京的经济发展情况",
             "description": "检索北京经济发展相关信息",
             "depends_on": []
         }},
         {{
             "task_id": "task_002",
-            "task_type": "graphrag",
+            "task_type": "global",
             "query": "上海的经济发展情况",
             "description": "检索上海经济发展相关信息",
             "depends_on": []
         }},
         {{
             "task_id": "task_003",
-            "task_type": "graphrag",
+            "task_type": "global",
             "query": "北京和上海经济发展的对比",
             "description": "检索两地经济发展的对比分析",
             "depends_on": ["task_001", "task_002"]
@@ -242,10 +249,11 @@ class Planner:
         for task_data in data.get("tasks", []):
             task = Task(
                 task_id=task_data.get("task_id", generate_task_id()),
-                task_type=TaskType(task_data.get("task_type", "rag")),
+                task_type=TaskType(task_data.get("task_type", "global")),
                 query=task_data["query"],
                 description=task_data.get("description"),
                 depends_on=task_data.get("depends_on", []),
+                parameters=task_data.get("parameters", {}),
                 status=TaskStatus.PENDING
             )
             tasks.append(task)
@@ -254,7 +262,7 @@ class Planner:
         if not tasks:
             task = Task(
                 task_id=generate_task_id(),
-                task_type=TaskType.GRAPH_RAG,
+                task_type=TaskType.GLOBAL,
                 query=data.get("original_query", ""),
                 description="默认检索任务",
                 status=TaskStatus.PENDING

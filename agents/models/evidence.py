@@ -8,10 +8,9 @@ from datetime import datetime
 
 class EvidenceSource(Enum):
     """证据来源"""
-    RAG = "rag"
-    GRAPH_RAG = "graphrag"
-    VECTOR = "vector"
-    GRAPH = "graph"
+    NAIVE = "naive"
+    LOCAL = "local"
+    GLOBAL = "global"
 
 
 @dataclass
@@ -71,6 +70,20 @@ class EvidenceChain:
     def add_graph_path(self, path: List[str]) -> None:
         """添加图谱路径"""
         self.graph_paths.append(path)
+
+    def merge(self, other: "EvidenceChain") -> None:
+        """
+        合并另一个 EvidenceChain 的内容到当前对象
+        用于线程安全的结果聚合
+        """
+        self.evidence_list.extend(other.evidence_list)
+        self.reasoning_steps.extend(other.reasoning_steps)
+        self.graph_paths.extend(other.graph_paths)
+
+    @classmethod
+    def empty(cls, chain_id: str, query: str) -> "EvidenceChain":
+        """创建一个空的 EvidenceChain"""
+        return cls(chain_id=chain_id, query=query)
 
     def get_evidence_by_task(self, task_id: str) -> List[Evidence]:
         """获取指定任务的所有证据"""

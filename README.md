@@ -1,401 +1,269 @@
-# GraphRAG - 智能检索增强生成系统
+# GraphRAG — RAG + GraphRAG + Multi-Agent 检索增强生成
 
-基于 RAG + GraphRAG + Multi-Agent 的智能对话系统，支持复杂任务自动分解、并行检索与可解释推理（含证据链追踪）。
+基于 **naive（向量）/ local（实体图）/ global（关系图）** 三模式检索，与 **Planner → Executor → Reporter** 多智能体编排的问答系统。支持复杂问题自动分解、依赖感知并行执行、实体消歧的知识图谱构建与证据链追踪。
+
+> **注意**：本仓库是 `agentic-rag` 之外的独立实现（顶层模块 `agents/` `rag/` `graphrag/` `models/`），两者已分叉、**不可互通**。LLM / 建图 / 检索代码请勿跨仓库混用。
+
+---
 
 ## 核心特性
 
-- 🔍 **RAG** - 向量检索 + 关键词检索 + 重排序
-- 🕸️ **GraphRAG** - 实体检索 + 图谱多跳遍历 + 混合检索
-- 🤖 **Multi-Agent** - Plan-Execute-Report 架构，自动任务分解
-- ⚡ **并行执行** - 依赖感知的并行任务执行
-- 🔗 **证据链追踪** - 完整记录推理过程中的所有证据
-- 📊 **可解释推理** - 结构化证据 + 图谱路径展示
-- 🛡️ **容错降级** - 自动重试 + GraphRAG→RAG 降级策略
+- 🕸️ **三模式检索**（参考 LightRAG 分类）
+  - `naive` — 纯向量两阶段召回（recall + 可选 rerank）
+  - `local` — 实体检索 + 图 BFS 多跳遍历，返回实体关联的 chunk
+  - `global` — 关系级 embedding 检索 + 跨文档 chunk 合成
+- 🏗️ **知识图谱构建**
+  - LLM 结构化抽取实体/关系（LightRAG 风格 schema，N-ary 拆二元）
+  - **embedding 消歧**（`resolver.py`：bge-m3 + FAISS + Union-Find，相似度阈值 τ=0.9）
+  - 增量更新（按文档 hash 跳过未变化文档）
+- 🤖 **Multi-Agent 编排**：Planner 任务分解 → Executor 依赖感知并行 → Reporter 证据链报告
+- 🔗 **证据链**：Task / Evidence / Plan / Report 全套数据模型，`structured_evidence` 结构化输出
+
+---
 
 ## 项目结构
 
 ```
 graphRAG/
-├── agents/                 # Multi-Agent 编排系统
-│   ├── models/            # 核心数据模型
-│   │   ├── task.py        # 任务定义
-│   │   ├── evidence.py    # 证据链定义
-│   │   ├── plan.py        # 计划定义
-│   │   └── report.py      # 报告定义
-│   ├── tools/             # 工具层
-│   │   ├── rag_tool.py    # RAG 工具包装
-│   │   └── graphrag_tool.py # GraphRAG 工具包装
-│   ├── planner.py         # 任务规划器
-│   ├── executor.py        # 任务执行器
-│   ├── reporter.py        # 报告生成器
-│   └── orchestrator.py    # 编排器（统一入口）
-├── rag/                   # RAG 模块
-│   ├── indexer.py         # 文档索引器
-│   └── retriever.py       # 检索器（向量+BM25+ 重排序）
-├── graphrag/              # GraphRAG 模块
-│   ├── graph/             # 图谱构建
-│   │   ├── builder.py     # 图谱构建器
-│   │   ├── extractor.py   # 实体关系提取
-│   │   ├── community_detector.py # 社区检测
-│   │   └── community_summarizer.py # 社区摘要
-│   ├── indexer.py         # 图谱索引器
-│   └── retriever.py       # 图谱检索器（向量 + 实体 + 多跳）
-├── models/                # 基础模型
-│   ├── llm.py             # LLM 封装
-│   ├── embedding.py       # 嵌入模型
-│   └── reranker.py        # 重排序模型
-├── datasets/              # 数据集
-├── storage/               # 索引存储
-└── test_agents.py         # Agent 测试
+├── agents/                  # 多智能体编排
+│   ├── models/              # 数据模型
+│   │   ├── task.py          # Task, TaskType(naive|local|global|deep_research), TaskStatus
+│   │   ├── evidence.py      # Evidence, EvidenceSource, EvidenceChain
+│   │   ├── plan.py          # Plan, PlanStatus
+│   │   └── report.py        # Report, ReportSection
+│   ├── tools/
+│   │   ├── base.py          # BaseTool / ToolResult（抽象基类）
+│   │   ├── registry.py      # ToolRegistry, SearchModeTool(mode=naive|local|global)
+│   │   ├── rag_tool.py      # RAGTool（vector / bm25 / hybrid）
+│   │   └── graphrag_tool.py # GraphRAGTool（naive / local / global）
+│   ├── planner.py           # 任务规划
+│   ├── executor.py          # 并行执行（重试；降级未实现）
+│   ├── reporter.py          # 报告生成
+│   └── orchestrator.py      # Orchestrator 统一入口
+├── rag/
+│   ├── indexer.py           # get_indexer(...).index_documents(docs) → (chunks, vectorstore)
+│   └── retriever.py         # get_retriever(...)：vector_search / bm25_search / hybrid_search
+├── graphrag/
+│   ├── graph/
+│   │   ├── builder.py       # 图构建（抽取→消歧→NetworkX DiGraph）
+│   │   ├── extractor.py     # 实体/关系抽取（LightRAG 风格）
+│   │   ├── resolver.py      # 实体消歧（Union-Find）
+│   │   ├── community_detector.py    # ⚠️ 未接入主流程
+│   │   └── community_summarizer.py  # ⚠️ 未接入主流程（当前含语法错误）
+│   ├── indexer.py           # get_graphrag_indexer(...).index_documents(docs, database_path)
+│   └── retriever.py         # naive_search / local_search / global_search
+├── models/
+│   ├── llm.py               # get_llm / get_json_llm
+│   ├── embedding.py         # get_embedding（默认 BAAI/bge-m3, cpu）
+│   ├── reranker.py          # cross-encoder reranker
+│   └── chunker.py           # tiktoken 分块（默认 512/50，可截断）
+└── scripts/                 # websearch 代理（实验性）
 ```
+
+---
+
+## 安装
+
+```bash
+# 推荐：使用 uv（依赖见 pyproject.toml）
+uv sync
+
+# 或 pip 安装本包
+pip install -e .
+```
+
+- 需要 Python ≥ 3.10。
+- 仓库**没有** `requirements.txt`（旧版 README 的 `pip install -r requirements.txt` 不适用）。
+- 图社区检测相关依赖（`python-louvain` 等）已声明在 pyproject，但社区检测代码**未接入主流程**，非必需。
+
+---
+
+## 配置 LLM / Embedding
+
+当前通过**代码传参**配置（**不支持环境变量覆盖**）：
+
+```python
+from models.llm import get_llm
+from models.embedding import get_embedding
+
+# LLM：默认指向本地 vLLM/Ollama 的 OpenAI 兼容端点，可替换为任意 OpenAI 兼容服务
+llm = get_llm(
+    model="Qwen/Qwen3.5-27B",
+    base_url="http://localhost:8000/v1",   # 例如腾讯内网 tt-switch: http://127.0.0.1:15721/tencent/v1
+    api_key="EMPTY",
+    enable_thinking=False,
+)
+
+# Embedding：默认 BAAI/bge-m3，device 默认 cpu（无 GPU 环境不要传 cuda）
+embedding = get_embedding(model="BAAI/bge-m3", device="cpu")
+```
+
+---
 
 ## 快速开始
 
-### 安装依赖
-
-```bash
-# 使用 uv 安装
-uv sync
-
-# 或使用 pip
-pip install -r requirements.txt
-```
-
-### 基础 RAG 使用
+### 1. 向量 RAG
 
 ```python
 from rag.indexer import get_indexer
 from rag.retriever import get_retriever
-from models.embedding import get_embedding
 from models.chunker import get_chunker
-
-# 1. 创建索引
-chunker = get_chunker(model="cl100k_base", chunk_size=500, overlap=100)
-embedding = get_embedding(model="BAAI/bge-m3", device="cuda:0")
-indexer = get_indexer(chunker=chunker, embedding=embedding)
-
-# 加载文档并索引
+from models.embedding import get_embedding
 from langchain_core.documents import Document
-documents = [Document(page_content="北京是中国的首都")]
-chunks = indexer.index_documents(documents)
-vectorstore = indexer.build_vectorstore(chunks)
 
-# 2. 检索
-retriever = get_retriever(vectorstore, top_k=5)
-results = retriever.retrieve("中国的首都是哪里？")
-for doc in results:
-    print(doc.page_content)
+documents = [Document(page_content="北京是中国的首都，常住人口超过两千万。")]
+
+indexer = get_indexer(chunker=get_chunker(), embedding=get_embedding())
+chunks, vectorstore = indexer.index_documents(documents)      # 返回 (chunks, vectorstore)
+
+# 关闭 reranker（无 GPU / 不需要时显式传 None，否则默认加载到 reranker_device）
+retriever = get_retriever(vectorstore, top_k=5, reranker_model=None)
+
+retriever.vector_search("中国的首都是哪里？")                  # 纯向量
+retriever.set_bm25_retriever(chunks)                           # 可选：BM25
+retriever.hybrid_search("中国的首都是哪里？",
+                        vector_weight=0.5, bm25_weight=0.5)    # 混合检索
 ```
 
-### GraphRAG 使用
+> 注：`get_retriever` 默认 `reranker_model="BAAI/bge-reranker-v2-m3"`、`reranker_device="cuda:1"`。CPU 环境请显式传 `reranker_model=None`。
+
+### 2. GraphRAG 建图与检索
 
 ```python
 from graphrag.indexer import get_graphrag_indexer
-from graphrag.retriever import get_graphrag_retriever
 
-# 1. 构建图谱索引
-indexer = get_graphrag_indexer(
-    storage_path="./storage/graphrag_index",
-    chunk_size=500,
-    device="cuda:0"
-)
+indexer = get_graphrag_indexer()          # 默认 max_workers=16、thread 并发抽取
+chunks, vectorstore, graph, entity_index, relationship_index = \
+    indexer.index_documents(documents, database_path="./storage/graphrag_index")
 
-# 加载文档并构建图谱
-documents = [...]  # 你的文档列表
-indexer.index_documents(documents)
-
-# 2. 图谱检索
-retriever = indexer.get_retriever()
-results = retriever.retrieve(
-    query="北京和上海的关系",
-    top_k_entities=3,
-    max_hops=2
-)
-for doc in results:
-    print(doc.page_content)
+# 产物（database_path 目录下）：
+#   vectorstore/          向量库（naive 用）
+#   graph.pkl             知识图谱
+#   entities.pkl          {"index": FAISS, "metadata": [...]}   实体索引
+#   relationships.pkl     {"index": FAISS, "metadata": [...]}   关系索引
 ```
 
-### Multi-Agent 使用（推荐）
-
-统一入口，所有查询都有完整的证据链追踪：
+检索可通过工具层（自动从 storage 目录加载上述产物）：
 
 ```python
-from agents import get_orchestrator
+from agents.tools import SearchModeTool
 
-# 创建编排器
-orchestrator = get_orchestrator(
-    rag_storage_path="./storage/rag_index",
-    graphrag_storage_path="./storage/graphrag_index"
-)
+naive = SearchModeTool(mode="naive",  storage_path="./storage/graphrag_index")
+local = SearchModeTool(mode="local",  storage_path="./storage/graphrag_index")
 
-# 处理查询
-result = orchestrator.process_query("分析北京和上海的经济发展差异")
-
-if result.success:
-    print("答案:", result.answer)
-    print("任务数:", len(result.plan.tasks))
-    print("证据链:", result.report.structured_evidence)
-else:
-    print("错误:", result.error)
+res = local.search("北京和上海在经济发展上有哪些联系？")
+if res.success:
+    for ev in res.evidence:
+        print(ev.content)
 ```
 
-## 核心模块详解
-
-### 1. RAG 模块
-
-支持向量检索、BM25 关键词检索和重排序：
-
-```python
-from rag.retriever import get_retriever
-
-retriever = get_retriever(
-    vectorstore=vectorstore,
-    top_k=5,
-    reranker_model="BAAI/bge-reranker-v2-m3",  # 可选重排序
-    reranker_device="cuda:0"
-)
-
-# 向量检索
-results = retriever.retrieve("查询文本")
-
-# 混合检索（向量+BM25）
-retriever.set_bm25_retriever(documents)  # 先设置 BM25 索引
-results = retriever.hybrid_search("查询文本", vector_weight=0.5, bm25_weight=0.5)
-```
-
-### 2. GraphRAG 模块
-
-支持实体检索和多跳图谱遍历：
+或直接使用底层 retriever（naive / local / global 的真实签名）：
 
 ```python
 from graphrag.retriever import get_graphrag_retriever
 
 retriever = get_graphrag_retriever(
     graph=graph,
-    entity_index=entity_index,
-    entity_metadata=entity_metadata,
-    embedding=embedding,
-    vectorstore=vectorstore
+    entity_index=entity_index,          entity_metadata=<metadata list>,
+    relationship_index=relationship_index, relationship_metadata=<metadata list>,
+    embedding=embedding, vectorstore=vectorstore,
 )
-
-# 实体检索
-entities = retriever.search_entities("中国的首都", top_k=3)
-
-# 多跳遍历
-graph_doc = retriever.traverse_multi_hop(["北京市"], max_hops=2)
-
-# 混合检索（向量 + 图谱）
-results = retriever.retrieve(
-    "中国的首都是哪里？",
-    top_k_vectors=5,
-    top_k_entities=3,
-    max_hops=2,
-    vector_weight=0.5,
-    graph_weight=0.5
-)
+retriever.naive_search("...", top_k=5)
+retriever.local_search("...", top_k_entities=3, max_hops=1, max_neighbors=3, max_chunks=10)
+retriever.global_search("...", top_k_relationships=10, max_chunks=10)
 ```
 
-### 3. Multi-Agent 模块
+**三种模式的语义：**
 
-基于 Plan-Execute-Report 架构：
+| 模式 | 机制 | 适合 |
+|------|------|------|
+| `naive` | 向量检索，文本 chunk 语义相似 | 事实/数值/定义类问题 |
+| `local` | 实体向量检索 → BFS 多跳遍历邻居 → 取关联 chunk | 实体关系、特定命名实体（探测器、实验、机构） |
+| `global` | 关系向量检索 → 跨文档 chunk 合成 | 跨文档综合、对比、主题概览 |
 
-```
-用户查询
-    ↓
-┌─────────────────────────────────────────┐
-│         Orchestrator (编排器)            │
-│                                          │
-│  Planner → Executor → Reporter          │
-│  (规划)   (执行)     (报告)              │
-│                                          │
-└─────────────────────────────────────────┘
-    ↓
-最终答案 + 证据链
-```
+### 3. Multi-Agent 编排
 
-#### Planner（任务规划）
-
-LLM 判断查询类型，决定单任务还是多任务分解：
+统一入口（每个查询都产生完整证据链报告）：
 
 ```python
-from agents import Planner
+from agents import get_orchestrator
 
-planner = Planner()
-
-# 简单查询 → 单任务
-result = planner.plan("什么是人工智能")
-# → 1 个任务，使用 rag 工具
-
-# 复杂查询 → 多任务
-result = planner.plan("分析北京和上海的经济发展差异")
-# → 3 个任务，使用 graphrag 工具
-```
-
-#### Executor（任务执行）
-
-依赖感知的并行执行，支持重试和降级：
-
-```python
-from agents import Executor
-
-executor = Executor(
-    max_parallel_workers=4,  # 最大并行线程数
-    max_retries=1,            # 失败重试次数
-    enable_fallback=True      # 启用 graphrag→rag 降级
-)
-
-result = executor.execute_parallel(plan)
-
-# 查看执行详情
-for r in result.task_results:
-    print(f"{r.task.task_id}: 重试{r.retry_count}次，降级={r.fallback_used}")
-```
-
-#### Reporter（报告生成）
-
-整合所有证据，生成带证据链的最终答案：
-
-```python
-from agents import Reporter
-
-reporter = Reporter()
-result = reporter.generate(executor_result, plan)
+orchestrator = get_orchestrator()        # storage 参数见下方"注意"
+result = orchestrator.process_query("分析北京和上海的经济发展差异，以及两地交通联系")
 
 if result.success:
-    report = result.report
-    print(report.final_answer)
-    print(report.structured_evidence)  # 结构化证据
+    print("答案:", result.answer)
+    print("任务数:", len(result.plan.tasks))
+    print("结构化证据:", result.report.structured_evidence)
+else:
+    print("错误:", result.error)
 ```
+
+执行链路：`Planner.plan(query)` 分解为若干 `Task`（任务类型 ∈ `TaskType.{NAIVE, LOCAL, GLOBAL}`）→ `Executor.execute_parallel(plan)` 按依赖分层并行执行 → `Reporter.generate(executor_result, plan)` 汇总为带证据链的 `Report`。
+
+**注意（当前实现的关键约束）：**
+- Executor 通过 **`ToolRegistry`** 获取工具实例，**使用前需先把工具注册进注册表**。多模式场景按 `naive/local/global` 各注册一个 `SearchModeTool`：
+  ```python
+  from agents.tools import ToolRegistry, SearchModeTool
+  ToolRegistry.register("naive",  SearchModeTool(mode="naive",  storage_path="./storage/graphrag_index"))
+  ToolRegistry.register("local",  SearchModeTool(mode="local",  storage_path="./storage/graphrag_index"))
+  ToolRegistry.register("global", SearchModeTool(mode="global", storage_path="./storage/graphrag_index"))
+  ```
+- `get_orchestrator(rag_storage_path=..., graphrag_storage_path=...)` 接收这两个参数，但**当前不会把它们下传给工具层**——工具层使用自身默认路径 `./storage/rag_index` / `./storage/graphrag_index`。因此请把索引构建到工具默认路径，或在注册时显式指定 `storage_path`。
+
+---
 
 ## 数据模型
 
-### Task（任务）
+### Task / TaskType
 
 ```python
+from agents.models import Task, TaskType
+
 Task(
     task_id="task_001",
-    task_type=TaskType.GRAPH_RAG,  # rag | graphrag
+    task_type=TaskType.LOCAL,   # NAIVE | LOCAL | GLOBAL | DEEP_RESEARCH
     query="北京的经济情况",
     description="检索北京的经济信息",
-    depends_on=["task_000"]  # 依赖的任务 ID
+    depends_on=["task_000"],    # 依赖任务 ID，决定执行层级
 )
 ```
 
-### Evidence（证据）
+### Evidence / EvidenceChain
 
 ```python
+from agents.models import Evidence, EvidenceSource
+
 Evidence(
-    evidence_id="evidence_xxx",
-    source=EvidenceSource.GRAPH_RAG,  # rag | graph_rag
-    content="北京 GDP 超过 4 万亿元...",
+    evidence_id="evidence_001",
+    source=EvidenceSource.LOCAL,   # NAIVE | LOCAL | GLOBAL
+    content="北京 GDP 超过 4 万亿元……",
     score=0.92,
-    task_id="task_001"
+    task_id="task_001",
 )
+# EvidenceChain: chain_id + query + evidence_list + reasoning_steps + graph_paths
 ```
 
-### EvidenceChain（证据链）
+---
 
-```python
-EvidenceChain(
-    chain_id="chain_xxx",
-    query="用户查询",
-    evidence_list=[...],      # 所有证据
-    reasoning_steps=[...],    # 推理步骤
-    graph_paths=[...]         # 图谱路径
-)
-```
+## 已知限制 / 当前状态
 
-## 配置说明
+README 以上内容以当前代码为准；已知的坑与未完成部分如下，改动代码前请先确认：
 
-### LLM 配置
+1. **`global` 模式的工具层 bug**：`GraphRAGTool.global_search`（`agents/tools/graphrag_tool.py`）调用 `GraphRAGRetriever.global_search` 时多传了 `top_k_vectors` 参数，而 retriever 的 `global_search(query, top_k_relationships, max_chunks)` 不接受该参数 → **经工具层/编排走 global 会返回 `success=False`**。底层 `GraphRAGRetriever.global_search` 本身正常。
+2. **无运行时降级**：`Executor._try_fallback` 目前恒返回 `False`，任务失败只做重试（`max_retries` 次），**不会** graphrag→rag 降级。
+3. **社区检测/摘要未接线**：`graphrag/graph/community_detector.py`、`community_summarizer.py` 未接入 `index_documents` 主流程；`community_summarizer.py` 当前含语法错误，无法导入。
+4. **LLM 不支持环境变量**：`models/llm.py` 的 `get_llm` 不会读取 `LLM_MODEL/LLM_BASE_URL/LLM_API_KEY`（如需环境变量可仿照 agentic-rag 改造）。
+5. **Orchestrator 的 storage 参数是"死参数"**（见上文 Multi-Agent 注意）。
+6. `scripts/` 只有实验性 websearch 代理，无命令行入口。
 
-编辑 `models/llm.py` 或设置环境变量：
+---
 
-```python
-from models.llm import get_llm
+## 相关
 
-llm = get_llm(
-    model="Qwen/Qwen3.5-27B",
-    base_url="http://localhost:8000/v1",  # vLLM/Ollama 地址
-    api_key="EMPTY"
-)
-```
-
-### Embedding 配置
-
-```python
-from models.embedding import get_embedding
-
-embedding = get_embedding(
-    model="BAAI/bge-m3",  # 或 "sentence-transformers/all-MiniLM-L6-v2"
-    device="cuda:0"
-)
-```
-
-## 测试
-
-```bash
-# 测试 Agent 模块
-python test_agents.py
-
-# 测试 RAG 模块
-python -m rag.retriever
-
-# 测试 GraphRAG 模块
-python -m graphrag.retriever
-```
-
-## 设计决策
-
-### 为什么统一走 Multi-Agent？
-
-| 方案 | 优点 | 缺点 |
-|------|------|------|
-| **Router 分流** | 简单查询快速 | 简单查询无证据链 |
-| **统一 Multi-Agent** | 所有查询都有证据链 | 简单查询略慢 |
-
-**选择统一 Multi-Agent 的原因：**
-1. **功能完整性** - 所有查询都有证据链追踪
-2. **架构简洁** - 单一入口，无分支
-3. **可维护性** - 修改一处即可
-
-**性能优化：** Planner 使用 LLM 判断，简单查询返回单任务，延迟增加可忽略。
-
-### 容错/降级策略
-
-```
-任务失败 → 重试 → 降级 (graphrag→rag) → 跳过
-```
-
-| 场景 | 处理 |
-|------|------|
-| 任务失败 | 自动重试（最多 `max_retries` 次） |
-| GraphRAG 失败 | 降级为 RAG 继续执行 |
-| 所有尝试失败 | 跳过任务，记录错误，继续其他任务 |
-
-## 扩展
-
-### 添加新工具
-
-```python
-from agents.tools import BaseTool, ToolResult, ToolRegistry
-
-class MyCustomTool(BaseTool):
-    def search(self, query: str, **kwargs) -> ToolResult:
-        # 实现搜索逻辑
-        return ToolResult(success=True, answer="...", evidence=[])
-    
-    def get_name(self) -> str:
-        return "my_custom_tool"
-
-# 注册工具
-ToolRegistry.register("my_tool", MyCustomTool)
-```
+- 设计上参考 **LightRAG**（三模式检索 + 抽取 schema）与 **GraphRAG** 式实体消歧思路。
+- 完整评测脚本与归档见配套仓库 `agentic-rag`（`benchmarks/AI4EIC2023`）。
 
 ## 许可证
 
 MIT
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
